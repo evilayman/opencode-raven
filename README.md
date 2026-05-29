@@ -2,7 +2,7 @@
 
 <table>
 <tr>
-<td><img src="Raven.png" alt="Raven" width="384" /></td>
+<td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
 <strong>Search-first subagent for <a href="https://opencode.ai">opencode</a></strong><br/>
 Intercepts search tool calls from other agents and routes them to a dedicated <strong>@raven</strong> agent with Context7, Exa AI, and Grep.app MCPs.
