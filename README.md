@@ -5,14 +5,18 @@
 <td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
 <strong>Search-first subagent for <a href="https://opencode.ai">opencode</a></strong><br/>
-Intercepts search tool calls from other agents and routes them to a dedicated <strong>@raven</strong> agent with Context7, Exa AI, and Grep.app MCPs.
+Intercepts search tool calls and routes them to a dedicated <strong>@raven</strong> agent with Context7, Exa AI, and Grep.app MCPs.
 </td>
 </tr>
 </table>
 
 ## Why?
 
-Other agents (orchestrator, fixer, etc.) waste tokens and context on search tools. Raven gives them a single delegation target that's purpose-built for search, with the right MCPs wired in and a compact-output prompt.
+Search is the most common thing agents do — and the most wasteful. Every search call burns tokens and context on results that a cheap, focused agent could handle better. Raven fixes three problems:
+
+1. **Cost** — Use a free model like `opencode/deepseek-v4-flash-free` for all search, saving your expensive model's context for actual work.
+2. **Reliability** — Hard-enforced interception. Other plugins suggest delegation; Raven *blocks* search tools for non-Raven agents and redirects them. No more agents ignoring your instructions and searching directly.
+3. **Simplicity** — One plugin, one agent, zero config. No bundled agents or features you don't need. Works with any agent or workflow. Just add it to `opencode.jsonc` and restart.
 
 ## Install
 
@@ -45,7 +49,7 @@ Config persists across restarts in `raven-config.json` (next to your `opencode.j
 
 ### raven-config.json
 
-Created automatically in your project root on first toggle. Edit manually or use `/raven` commands:
+Created automatically on first toggle. Edit manually or use `/raven` commands:
 
 ```json
 {
