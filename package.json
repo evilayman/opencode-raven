@@ -1,0 +1,34 @@
+{
+  "name": "opencode-raven",
+  "version": "1.0.0",
+  "description": "Search-first subagent for opencode — intercepts search tools and routes them to a dedicated @raven agent with Context7, Exa AI, and Grep.app MCPs",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "types": "./index.ts",
+  "files": [
+    "index.ts",
+    "Raven.md",
+    "Raven.png",
+    "mcp-guidance.md",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "search",
+    "subagent",
+    "mcp",
+    "context7",
+    "exa",
+    "grep.app"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
