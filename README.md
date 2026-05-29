@@ -70,7 +70,7 @@ All three MCPs are enabled by default:
 | MCP | URL | Notes |
 |-----|-----|-------|
 | Context7 | `https://mcp.context7.com/mcp` | No API key needed |
-| Exa AI | `https://mcp.exa.ai/mcp` | Requires Exa account |
+| Exa AI | `https://mcp.exa.ai/mcp` | No API key needed |
 | Grep.app | `https://mcp.grep.app` | No API key needed |
 
 To disable an MCP, override it in your `opencode.jsonc`:
