@@ -65,13 +65,13 @@ Created automatically on first toggle. Edit manually or use `/raven` commands:
 
 ### MCP servers
 
-All three MCPs work without API keys. To add keys for higher rate limits:
+All three MCPs work without API keys. Adding keys increases rate limits:
 
 | MCP | URL | API key |
 |-----|-----|---------|
-| Context7 | `https://mcp.context7.com/mcp` | Not needed |
-| Exa AI | `https://mcp.exa.ai/mcp` | Not needed (higher limits with key) |
-| Grep.app | `https://mcp.grep.app` | Not needed |
+| Context7 | `https://mcp.context7.com/mcp` | Free key at [context7.com/dashboard](https://context7.com/dashboard) — higher limits |
+| Exa AI | `https://mcp.exa.ai/mcp` | Free key at [exa.ai](https://exa.ai) — higher limits |
+| Grep.app | `https://mcp.grep.app` | Not available — public API, no key needed |
 
 To add an API key, override the MCP in your `opencode.jsonc` with a `headers` field:
 
