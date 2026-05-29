@@ -75,11 +75,11 @@ Created automatically on first toggle. Edit manually or use `/raven` commands:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Whether search tool interception is active |
-| `model` | *(from Raven.md)* | Override Raven's model without editing package files |
+| `model` | *(built-in default)* | Override Raven's model without editing package files |
 
 ### MCP servers
 
-All three MCPs work without API keys. Adding keys increases rate limits:
+All three MCPs work without API keys. Add keys for higher rate limits:
 
 | MCP | URL | API key |
 |-----|-----|---------|
@@ -148,6 +148,8 @@ To disable an MCP entirely:
 **Unrestricted**: `webfetch`, `read`, `task`, `raven_seek`, and non-search `bash` commands.
 
 ## Agent capabilities
+
+Raven itself has access to these tools (blocked for other agents by the plugin):
 
 | Tool / MCP | Purpose |
 |------------|---------|
