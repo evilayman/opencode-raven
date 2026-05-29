@@ -47,17 +47,17 @@ Restart opencode.
 
 Config persists across restarts in `raven-config.json` (next to your `opencode.jsonc`).
 
-## raven_seek — search without task
+## raven_seek — fallback for agents without task
 
-Agents that have `task: false` (like subagents in oh-my-opencode) can't delegate to Raven via the `task` tool. **`raven_seek`** solves this — it's a custom tool registered by the plugin that any agent can call directly, no `task` permission needed.
+When search tools are blocked, agents are told to delegate to Raven via the `task` tool (`subagent_type="raven"`). This is the preferred path — the Raven subagent runs visibly in its own session, and you can see its work.
 
-When an agent's search tools are blocked, the redirect message tells it to use `raven_seek`. The tool creates a Raven session, sends the query, and returns the results.
+Some agents have `task: deny` and can't delegate. **`raven_seek`** is the fallback for those agents — a custom tool that any agent can call directly, no `task` permission needed:
 
 ```
 raven_seek(query: "how to use useEffect cleanup")
 ```
 
-This works even for agents that can't use `task` — it bypasses the delegation restriction entirely.
+The tool creates a Raven session behind the scenes, sends the query, and returns results. It's less visible than task delegation, so it's only used when task isn't available.
 
 ## Configuration
 
@@ -117,24 +117,35 @@ To disable an MCP entirely:
 | Hook | What it does |
 |------|--------------|
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
-| `tool` | Registers `raven_seek` — custom tool for agents that can't use `task` |
+| `tool` | Registers `raven_seek` — fallback tool for agents that can't use `task` |
 | `chat.message` | Tracks Raven's session IDs so its own tools aren't blocked |
 | `command.execute.before` | Handles `/raven on\|off\|model\|status` |
-| `tool.execute.before` | Nukes search tool args for non-Raven agents (no wasted API calls) |
-| `tool.execute.after` | Replaces search tool output with redirect to Raven or `raven_seek` |
+| `tool.execute.before` | Throws to abort disabled tools before they execute — no wasted API calls |
+| `tool.execute.after` | Safety net: replaces output if the tool somehow still ran |
 
-**Blocked tools** (redirected for all agents except Raven itself):
+### Blocked tools (redirected for all agents except Raven itself)
 
-| Tool | Raven's equivalent |
-|------|-------------------|
-| `websearch_web_search_exa` | Exa AI (web search) |
-| `exa_web_search_exa` | Exa AI (web search via MCP) |
-| `exa_web_fetch_exa` | Exa AI (page fetch via MCP) |
-| `grep_app_searchGitHub` | Grep.app (GitHub examples) |
-| `grep` | grep/rg (local code search) |
-| `glob` | glob (file search) |
+**Dedicated search tools:**
 
-**Unrestricted**: `webfetch`, `read`, `bash`, `task`, `raven_seek`, and all other tools.
+| Tool | Source |
+|------|--------|
+| `grep`, `glob` | Built-in |
+| `websearch_web_search_exa` | WebSearch MCP |
+| `context7_resolve-library-id`, `context7_query-docs` | Context7 MCP |
+| `exa_web_search_exa`, `exa_web_fetch_exa`, `exa_web_search_advanced_exa` | Exa AI MCP |
+| `exa_company_research_exa`, `exa_crawling_exa`, `exa_people_search_exa` | Exa AI MCP |
+| `exa_linkedin_search_exa`, `exa_get_code_context_exa` | Exa AI MCP |
+| `exa_deep_researcher_start`, `exa_deep_researcher_check`, `exa_deep_search_exa` | Exa AI MCP |
+| `grep_app_searchGitHub` | Grep.app MCP |
+
+**Bash commands** — intercepted when the command or description matches a search pattern:
+
+| Pattern | Examples |
+|---------|----------|
+| Content search | `rg`, `grep`, `egrep`, `fgrep`, `git grep`, `ack`, `ag`, `findstr`, `Select-String` |
+| Filesystem exploration | `Get-ChildItem`, `gci`, `find -name`, `find -type`, `ls -R`, `dir /s` |
+
+**Unrestricted**: `webfetch`, `read`, `task`, `raven_seek`, and non-search `bash` commands.
 
 ## Agent capabilities
 
