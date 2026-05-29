@@ -1,5 +1,9 @@
 # opencode-raven
 
+<div align="center">
+  <img src="Raven.png" alt="Raven" width="256" />
+</div>
+
 Search-first subagent for [opencode](https://opencode.ai) — intercepts search tool calls from other agents and routes them to a dedicated **@raven** agent with Context7, Exa AI, and Grep.app MCPs.
 
 ## Why?
