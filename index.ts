@@ -11,13 +11,39 @@ const MCP_GUIDANCE_MD = join(PKG_DIR, "mcp-guidance.md")
 
 // ── Search tools that should be intercepted for non-Raven agents ──
 const SEARCH_TOOLS = [
-  "websearch_web_search_exa",
-  "exa_web_search_exa",
-  "exa_web_fetch_exa",
-  "grep_app_searchGitHub",
+  // Built-in tools
   "grep",
   "glob",
+  // WebSearch MCP
+  "websearch_web_search_exa",
+  // Context7 MCP
+  "context7_resolve-library-id",
+  "context7_query-docs",
+  // Exa AI MCP
+  "exa_web_search_exa",
+  "exa_web_fetch_exa",
+  "exa_web_search_advanced_exa",
+  "exa_company_research_exa",
+  "exa_crawling_exa",
+  "exa_people_search_exa",
+  "exa_linkedin_search_exa",
+  "exa_get_code_context_exa",
+  "exa_deep_researcher_start",
+  "exa_deep_researcher_check",
+  "exa_deep_search_exa",
+  // Grep.app MCP
+  "grep_app_searchGitHub",
 ]
+
+// ── Bash commands that look like search workarounds ──
+const SEARCH_BASH_RE = /\b(rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String|Get-ChildItem|gci\b|dir\b\s+[/-][sS]|ls\b\s+-[rR]|find\b\s+.*-name|find\b\s+.*-type)\b/
+
+function isSearchBash(tool: string, args: any): boolean {
+  if (tool !== "bash") return false
+  const cmd = String(args?.command ?? "")
+  const desc = String(args?.description ?? "")
+  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc)
+}
 
 // ── Config file shape ──
 interface RavenConfig {
@@ -181,7 +207,7 @@ export default ((input: PluginInput) => {
     // Register raven_seek tool — lets agents with task:false still search through Raven
     tool: {
       "raven_seek": tool({
-        description: "Search using Raven. Use this when other search tools (grep, glob, web search, etc.) are disabled. Raven has access to Context7, Exa AI, and Grep.app for web search, docs lookup, and GitHub examples.",
+        description: "Fallback search tool — use only when task delegation to Raven (subagent_type=\"raven\") is unavailable. Raven has access to Context7, Exa AI, and Grep.app for web search, docs lookup, and GitHub examples.",
         args: {
           query: tool.schema.string().describe("What to search for — be specific about what you need (docs, code examples, web info, etc.)"),
         },
@@ -266,23 +292,33 @@ export default ((input: PluginInput) => {
 
     "tool.execute.before"(input: any, output: any) {
       if (!config.enabled) return
-      if (!SEARCH_TOOLS.includes(input.tool)) return
       if (ravenSessions.has(input.sessionID)) return
-      // Break args to prevent actual API calls
-      const args = output.args || {}
-      if ("query" in args) args.query = ""
-      output.args = { ...output.args, ...args }
+
+      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
+      const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
+
+      if (!isSearchTool && !isSearchBashCmd) return
+
+      throw new Error(
+        "Search tool disabled — delegate to Raven via the task tool (subagent_type=\"raven\")"
+      )
     },
 
     "tool.execute.after"(input: any, output: any) {
       if (!config.enabled) return
-      if (!SEARCH_TOOLS.includes(input.tool)) return
       if (ravenSessions.has(input.sessionID)) return
-      const msg =
-        "This tool is disabled. Use the raven_seek tool to search, or delegate to Raven with subagent_type=\"raven\"."
+
+      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
+      const isSearchBashCmd = isSearchBash(input.tool, input.args || output.args)
+
+      if (!isSearchTool && !isSearchBashCmd) return
+
+      const msg = "Search tool disabled — delegate to Raven via the task tool (subagent_type=\"raven\")"
       output.output = msg
-      const raw = output as any
-      if (raw.content?.[0]?.text) raw.content[0].text = msg
+      try {
+        const raw = output as any
+        if (raw.content?.[0]?.text) raw.content[0].text = msg
+      } catch {}
     },
   }
 }) satisfies Plugin
