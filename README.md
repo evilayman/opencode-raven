@@ -22,6 +22,8 @@ Search is the most common thing agents do — and the most wasteful. Every searc
 
 ```bash
 bun add opencode-raven
+# or
+npm install opencode-raven
 ```
 
 Then add to your `opencode.jsonc`:
@@ -44,6 +46,18 @@ Restart opencode.
 | `/raven model <name>` | Change Raven's model (e.g. `/raven model opencode/deepseek-v4-flash-free`) |
 
 Config persists across restarts in `raven-config.json` (next to your `opencode.jsonc`).
+
+## raven_seek — search without task
+
+Agents that have `task: false` (like subagents in oh-my-opencode) can't delegate to Raven via the `task` tool. **`raven_seek`** solves this — it's a custom tool registered by the plugin that any agent can call directly, no `task` permission needed.
+
+When an agent's search tools are blocked, the redirect message tells it to use `raven_seek`. The tool creates a Raven session, sends the query, and returns the results.
+
+```
+raven_seek(query: "how to use useEffect cleanup")
+```
+
+This works even for agents that can't use `task` — it bypasses the delegation restriction entirely.
 
 ## Configuration
 
@@ -103,12 +117,13 @@ To disable an MCP entirely:
 | Hook | What it does |
 |------|--------------|
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
+| `tool` | Registers `raven_seek` — custom tool for agents that can't use `task` |
 | `chat.message` | Tracks Raven's session IDs so its own tools aren't blocked |
 | `command.execute.before` | Handles `/raven on\|off\|model\|status` |
 | `tool.execute.before` | Nukes search tool args for non-Raven agents (no wasted API calls) |
-| `tool.execute.after` | Replaces search tool output with redirect to Raven |
+| `tool.execute.after` | Replaces search tool output with redirect to Raven or `raven_seek` |
 
-**Blocked tools** (redirected to Raven for all agents except Raven itself):
+**Blocked tools** (redirected for all agents except Raven itself):
 
 | Tool | Raven's equivalent |
 |------|-------------------|
@@ -119,7 +134,7 @@ To disable an MCP entirely:
 | `grep` | grep/rg (local code search) |
 | `glob` | glob (file search) |
 
-**Unrestricted**: `webfetch`, `read`, `bash`, `task`, and all other tools.
+**Unrestricted**: `webfetch`, `read`, `bash`, `task`, `raven_seek`, and all other tools.
 
 ## Agent capabilities
 

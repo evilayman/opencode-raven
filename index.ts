@@ -1,4 +1,5 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin"
 import { readFileSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 
@@ -108,6 +109,8 @@ function extractOptions(fm: Record<string, any>): Record<string, any> {
 
 // ── Plugin ──
 export default ((input: PluginInput) => {
+  const client = input.client
+
   // Config file lives in the project directory (next to opencode.jsonc)
   const configFile = join(input.directory, "raven-config.json")
 
@@ -175,6 +178,54 @@ export default ((input: PluginInput) => {
       }
     },
 
+    // Register raven_seek tool — lets agents with task:false still search through Raven
+    tool: {
+      "raven_seek": tool({
+        description: "Search using Raven. Use this when other search tools (grep, glob, web search, etc.) are disabled. Raven has access to Context7, Exa AI, and Grep.app for web search, docs lookup, and GitHub examples.",
+        args: {
+          query: tool.schema.string().describe("What to search for — be specific about what you need (docs, code examples, web info, etc.)"),
+        },
+        async execute(args, context) {
+          try {
+            // Create a Raven session
+            const session = await client.session.create({
+              body: { title: `raven_seek: ${args.query.slice(0, 80)}` },
+            })
+
+            const sessionId = (session as any)?.data?.id ?? (session as any)?.id
+            if (!sessionId) {
+              return { title: "Raven Seek", output: "Failed to create Raven session." }
+            }
+
+            // Send the query to Raven
+            const result = await client.session.prompt({
+              path: { id: sessionId },
+              body: {
+                agent: "raven",
+                parts: [{ type: "text", text: args.query }],
+              },
+            })
+
+            // Extract text from the response
+            const parts = (result as any)?.data?.parts ?? []
+            const textParts = parts
+              .filter((p: any) => p.type === "text" && p.text)
+              .map((p: any) => p.text)
+            const output = textParts.join("\n") || "Raven returned no results."
+
+            // Clean up the session
+            try {
+              await client.session.delete({ path: { id: sessionId } })
+            } catch { /* non-fatal */ }
+
+            return { title: "Raven Seek", output }
+          } catch (err: any) {
+            return { title: "Raven Seek", output: `Raven search failed: ${err.message || err}` }
+          }
+        },
+      }),
+    },
+
     // Track Raven sessions so we don't block its own tools
     "chat.message"(input: any, _output: any) {
       if (input.agent === "raven") {
@@ -228,7 +279,7 @@ export default ((input: PluginInput) => {
       if (!SEARCH_TOOLS.includes(input.tool)) return
       if (ravenSessions.has(input.sessionID)) return
       const msg =
-        "This tool is disabled. Delegate to Raven instead: use the task tool with subagent_type=\"raven\"."
+        "This tool is disabled. Use the raven_seek tool to search, or delegate to Raven with subagent_type=\"raven\"."
       output.output = msg
       const raw = output as any
       if (raw.content?.[0]?.text) raw.content[0].text = msg
