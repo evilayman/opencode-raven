@@ -65,15 +65,30 @@ Created automatically on first toggle. Edit manually or use `/raven` commands:
 
 ### MCP servers
 
-All three MCPs are enabled by default:
+All three MCPs work without API keys. To add keys for higher rate limits:
 
-| MCP | URL | Notes |
-|-----|-----|-------|
-| Context7 | `https://mcp.context7.com/mcp` | No API key needed |
-| Exa AI | `https://mcp.exa.ai/mcp` | No API key needed |
-| Grep.app | `https://mcp.grep.app` | No API key needed |
+| MCP | URL | API key |
+|-----|-----|---------|
+| Context7 | `https://mcp.context7.com/mcp` | Not needed |
+| Exa AI | `https://mcp.exa.ai/mcp` | Not needed (higher limits with key) |
+| Grep.app | `https://mcp.grep.app` | Not needed |
 
-To disable an MCP, override it in your `opencode.jsonc`:
+To add an API key, override the MCP in your `opencode.jsonc` with a `headers` field:
+
+```jsonc
+{
+  "mcp": {
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": { "x-api-key": "{env:EXA_API_KEY}" },
+      "enabled": true
+    }
+  }
+}
+```
+
+To disable an MCP entirely:
 
 ```jsonc
 {
