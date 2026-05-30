@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.3
+
+### Added
+- **`raven_seek` timeout** — configurable timeout (default 180s). Session kept alive on timeout for inspection. `/raven timeout <seconds>` command.
+- **Session debugger** — `scripts/debug-raven.ts` auto-detects the latest session and shows tool calls, timing, status, and errors.
+
+### Changed
+- **`raven_seek` timing** — every response includes elapsed time and token count.
+
+### Fixed
+- **`cmd /c` bypass** — `cmd /c dir`, `cmd /c findstr`, `cmd /c find`, `cmd /c where`, `cmd /c tree` now blocked.
+- **`raven_seek` wording** — tool description, reroute messages, and guidance clarify Raven handles ALL search types (local codebase, web, docs, GitHub).
+- **Case-insensitive bash blocking** — `SEARCH_BASH_RE` now case-insensitive.
+- **Unrestricted bash for Raven** — `bash: allow` instead of restrictive whitelist. Raven can now use `dir`, `ls`, `Get-ChildItem` for fast filesystem searches instead of slow `glob`.
+- **External directory access** — `external_directory: allow` prevents silent permission-prompt hangs in `raven_seek` sessions.
+
 ## 1.2.2
 
 ### Added

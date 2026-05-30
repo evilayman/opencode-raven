@@ -1,6 +1,6 @@
 {
   "name": "opencode-raven",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Search-first subagent for opencode — intercepts search tools and routes them through a hidden Raven agent with Context7, Exa AI, and Grep.app MCPs",
   "main": "./index.ts",
   "exports": {

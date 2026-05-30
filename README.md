@@ -5,7 +5,7 @@
 <td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
 <strong>Search-first subagent for <a href="https://opencode.ai">opencode</a></strong><br/>
-Intercepts search tool calls and routes them to a hidden Raven agent with Context7, Exa AI, and Grep.app MCPs.
+Intercepts search tool calls and routes them to a Raven agent with full local filesystem access plus Context7, Exa AI, and Grep.app MCPs.
 </td>
 </tr>
 </table>
@@ -16,7 +16,7 @@ Search is the most common thing agents do — and the most wasteful. Every searc
 
 1. **Cost** — Use a free model like `opencode/deepseek-v4-flash-free` for all search, saving your expensive model's context for actual work.
 2. **Reliability** — Hard-enforced interception. Other plugins suggest delegation; Raven *blocks* search tools for non-Raven agents and redirects them. No more agents ignoring your instructions and searching directly.
-3. **Simplicity** — One plugin, one agent, auto-configured. No bundled agents or features you don't need. Works with any agent or workflow. Just add it to `opencode.jsonc` and restart.
+3. **Simplicity** — One plugin, one agent, auto-configured. No bundled agents or features you don't need. Call Raven directly with `@Raven` or let agents use `raven_seek`. Works with any agent or workflow. Just add it to `opencode.jsonc` and restart.
 
 ## Install
 
@@ -49,6 +49,10 @@ Restart opencode.
 | `/raven stats` | Show context processed (session + all-time, bytes + tokens) |
 
 Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
+
+## Direct access
+
+You can call Raven directly with `@Raven` in any opencode chat. The Raven agent runs with full filesystem and MCP access — no permission prompts.
 
 ## raven_seek
 
@@ -127,7 +131,7 @@ To disable an MCP entirely:
 | Hook | What it does |
 |------|--------------|
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
-| `tool` | Registers `raven_seek` — hidden Raven sessions with timeout, error recovery, and timing. Tracks context processed for stats. |
+| `tool` | Registers `raven_seek` — creates Raven sessions with timeout, error recovery, and timing. Tracks context processed for stats. |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
 | `command.execute.before` | Handles `/raven on\|off\|model\|effort\|timeout\|stats\|status` |
 | `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Injects `<raven_guidance>` into subagent prompts. |
@@ -168,7 +172,8 @@ Raven itself has access to these tools (blocked for other agents by the plugin):
 | Tool / MCP | Purpose |
 |------------|---------|
 | `read`, `glob`, `grep`, `list` | Local codebase inspection |
-| `bash` (`rg`, `grep`, `git grep`) | Local search commands |
+| `bash` (all commands) | Full local shell access (`rg`, `grep`, `dir`, `ls`, `Get-ChildItem`, `find`, etc.) |
+| `external_directory` | Allowed — no permission prompts when accessing paths outside the workspace |
 | Context7 | Library/framework/SDK/API docs |
 | Exa AI | Web search, news, pages, products |
 | Grep.app | Public GitHub examples |

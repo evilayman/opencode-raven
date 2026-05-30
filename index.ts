@@ -1,8 +1,8 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs"
 import { join } from "node:path"
-import { homedir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 
 // ── Resolve paths relative to this package (works in node_modules/) ──
 const PKG_DIR = import.meta.dirname!
@@ -55,10 +55,11 @@ function stripQuotedContent(cmd: string): string {
 
 function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
-  const cmd = stripQuotedContent(String(args?.command ?? ""))
+  const raw = String(args?.command ?? "")
+  const cmd = stripQuotedContent(raw)
   const desc = stripQuotedContent(String(args?.description ?? ""))
-  const lower = cmd.toLowerCase().trim()
-  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc) || /^cmd\s+\/c\s+(dir|findstr|find|where|tree)\b/.test(lower)
+  const lower = raw.toLowerCase().trim()
+  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc) || /^cmd\s+\/c\s+"?(dir|findstr|find|where|tree)\b/.test(lower)
 }
 
 // ── Config file shape ──
@@ -138,6 +139,8 @@ function parseYaml(yaml: string): Record<string, any> {
         value = true
       } else if (value === "false") {
         value = false
+      } else if (/^\d+$/.test(value)) {
+        value = parseInt(value, 10)
       }
       current[key] = value
     }
@@ -296,6 +299,14 @@ export default ((input: PluginInput) => {
               return { title: "Raven Seek", output: "Failed to create Raven session." }
             }
 
+            // Log session for debugging
+            try {
+              const logFile = join(tmpdir(), "raven-sessions.log")
+              const ts = new Date().toISOString()
+              const q = String(args.query).slice(0, 100)
+              appendFileSync(logFile, `${ts} ${sessionId} "${q}"\n`)
+            } catch { /* non-fatal */ }
+
             // Send the query to Raven with timeout
             const result = await Promise.race([
               client.session.prompt({
@@ -318,11 +329,6 @@ export default ((input: PluginInput) => {
               .filter((p: any) => p.type === "text" && p.text)
               .map((p: any) => p.text)
             const output = textParts.join("\n") || "Raven returned no results."
-
-            // Clean up the session
-            try {
-              await client.session.delete({ path: { id: sessionId } })
-            } catch { /* non-fatal */ }
 
             // Track context saved
             addBytes(output.length)

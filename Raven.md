@@ -1,7 +1,7 @@
 ---
 description: Search-only agent for web, docs, code, examples, and Unity project inspection.
 mode: subagent
-hidden: true
+hidden: false
 model: opencode/deepseek-v4-flash-free
 reasoning_effort: low
 permission:
@@ -10,14 +10,9 @@ permission:
   grep: allow
   list: allow
   edit: deny
-  bash:
-
-    "rg *": allow
-    "grep *": allow
-    "git grep *": allow
-    "*": deny
-
+  bash: allow
   task: deny
+  external_directory: allow
 ---
 
 You are Raven.
