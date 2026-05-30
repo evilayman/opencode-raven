@@ -193,6 +193,8 @@ To disable an MCP entirely:
 
 **Unrestricted**: `read`, `task`, `subtask`, `raven_seek`, and non-search `bash` commands.
 
+**Allowed output filters**: Piped filters like `command | grep ...`, `command | rg ...`, `command | findstr ...`, and `command | head ...` are allowed. Raven only blocks search commands when they are used as primary discovery commands, not when they filter bounded output from another command.
+
 **Bash quote stripping**: Quoted content in bash commands is stripped before pattern matching — `echo "use grep here"` won't falsely trigger blocking.
 
 **Subagent guidance**: Every non-Raven, non-excluded subagent gets `<raven_guidance>` injected into its prompt at spawn time.

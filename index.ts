@@ -56,13 +56,53 @@ function stripQuotedContent(cmd: string): string {
     .replace(/"[^"]*"/g, '""')
 }
 
+function splitPipelineSegments(cmd: string): string[] {
+  const segments: string[] = []
+  let current = ""
+  for (let i = 0; i < cmd.length; i++) {
+    const char = cmd[i]
+    const prev = cmd[i - 1]
+    const next = cmd[i + 1]
+    if (char === "|" && prev !== "|" && next !== "|") {
+      segments.push(current)
+      current = ""
+    } else {
+      current += char
+    }
+  }
+  segments.push(current)
+  return segments
+}
+
+function isOutputFilterSegment(segment: string): boolean {
+  return /^\s*(?:grep|ripgrep|rg|egrep|fgrep|findstr|Select-String|head|tail)\b/i.test(segment)
+}
+
+function hasSearchAfterCommandSeparator(segment: string): boolean {
+  const separator = segment.search(/;|&&|\|\|/)
+  return separator !== -1 && SEARCH_BASH_RE.test(segment.slice(separator))
+}
+
+function commandLooksLikeSearch(cmd: string): boolean {
+  const lower = cmd.toLowerCase().trim()
+  if (/^cmd\s+\/c\s+"?(dir|findstr|find|where|tree)\b/.test(lower)) return true
+
+  return splitPipelineSegments(cmd).some((segment, index) => {
+    // Allow bounded filters over output already produced by the previous command:
+    //   pacman -Qi libarchive | head -15
+    //   7z i | grep -i udf
+    // These are not Raven-worthy filesystem/web/doc searches.
+    if (index > 0 && isOutputFilterSegment(segment)) return hasSearchAfterCommandSeparator(segment)
+    return SEARCH_BASH_RE.test(segment)
+  })
+}
+
 function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
   const raw = String(args?.command ?? "")
   const cmd = stripQuotedContent(raw)
   const desc = stripQuotedContent(String(args?.description ?? ""))
-  const lower = raw.toLowerCase().trim()
-  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc) || /^cmd\s+\/c\s+"?(dir|findstr|find|where|tree)\b/.test(lower)
+  return commandLooksLikeSearch(cmd) || (!cmd.includes("|") && SEARCH_BASH_RE.test(desc))
 }
 
 // ── Config file shape ──
