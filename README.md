@@ -66,7 +66,7 @@ This checks npm, clears Raven's opencode plugin cache when a newer version exist
 Manual alternatives:
 
 ```bash
-bun add opencode-raven@latest
+bun update --latest opencode-raven
 # or
 npm install opencode-raven@latest
 ```
