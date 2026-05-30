@@ -2,3 +2,4 @@ node_modules/
 bun.lock
 awesome-opencode-entry.yaml
 TODO.md
+dist/
