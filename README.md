@@ -82,7 +82,7 @@ Located at `~/.config/opencode/raven-config.json`. Auto-created on first run. Ed
 | `reasoning_effort` | *(from Raven.md)* | Override Raven's reasoning effort (e.g. `"low"`, `"medium"`, `"high"`) |
 | `excludeAgents` | `[]` | Agents that bypass search tool blocking (case-insensitive). e.g. `["librarian", "explorer"]` |
 | `excludeTools` | `[]` | Tools that never get blocked. e.g. `["glob", "webfetch"]` |
-| `stats` | *(auto)* | Global blocked call count and context saved. Managed automatically. |
+| `stats` | *(auto)* | Total context processed by Raven (bytes). Managed automatically. |
 
 ### MCP servers
 
@@ -126,7 +126,7 @@ To disable an MCP entirely:
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
 | `tool` | Registers `raven_seek` — hidden Raven sessions with error recovery for API failures. Tracks context processed for stats. |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
-| `command.execute.before` | Handles `/raven on\|off\|model\|effort\|status` |
+| `command.execute.before` | Handles `/raven on\|off\|model\|effort\|stats\|status` |
 | `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Injects `<raven_guidance>` into subagent prompts. |
 
 ### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
