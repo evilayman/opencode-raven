@@ -200,6 +200,7 @@ export default ((input: PluginInput) => {
 
   let config = loadConfig()
   const ravenSessions = new Set<string>()
+  const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
 
   // ── Check if an agent is excluded from Raven enforcement (case-insensitive) ──
@@ -291,13 +292,19 @@ export default ((input: PluginInput) => {
           try {
             // Create a Raven session
             const session = await client.session.create({
-              body: { title: `raven_seek: ${args.query.slice(0, 80)}` },
+              body: {
+                parentID: context.sessionID,
+                title: `raven_seek: ${args.query.slice(0, 80)}`,
+              },
             })
 
             const sessionId = (session as any)?.data?.id ?? (session as any)?.id
             if (!sessionId) {
               return { title: "Raven Seek", output: "Failed to create Raven session." }
             }
+
+            // Emit sessionId so the TUI renders a clickable delegation box
+            context.metadata({ metadata: { sessionId } })
 
             // Log session for debugging
             try {
@@ -333,7 +340,7 @@ export default ((input: PluginInput) => {
             // Track context saved
             addBytes(output.length)
 
-            return { title: "Raven Seek", output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(output.length)}, ~${formatTokens(output.length)} tokens*` }
+            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(output.length)}, ~${formatTokens(output.length)} tokens*` }
           } catch (err: any) {
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
@@ -422,6 +429,9 @@ export default ((input: PluginInput) => {
       // ── Subagent prompt injection: inject Raven guidance into every subagent ──
       if ((input.tool === "task" || input.tool === "subtask") && output.args) {
         const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
+        if (subagentType === "raven") {
+          ravenTaskCalls.add(input.callID)
+        }
         if (subagentType !== "raven" && !isExcluded(subagentType)) {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
@@ -440,7 +450,11 @@ export default ((input: PluginInput) => {
     },
 
     "tool.execute.after"(input: any, output: any) {
-      // Context saved is tracked in raven_seek instead
+      if (ravenTaskCalls.has(input.callID)) {
+        ravenTaskCalls.delete(input.callID)
+        const outputLen = String(output.output ?? "").length
+        if (outputLen > 0) addBytes(outputLen)
+      }
     },
   }
 }) satisfies Plugin

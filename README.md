@@ -131,10 +131,11 @@ To disable an MCP entirely:
 | Hook | What it does |
 |------|--------------|
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
-| `tool` | Registers `raven_seek` — creates Raven sessions with timeout, error recovery, and timing. Tracks context processed for stats. |
+| `tool` | Registers `raven_seek` — creates Raven sessions with timeout, error recovery, timing, and session tree visibility. Tracks context processed for stats (both `raven_seek` and direct `@Raven`). |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
 | `command.execute.before` | Handles `/raven on\|off\|model\|effort\|timeout\|stats\|status` |
 | `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Injects `<raven_guidance>` into subagent prompts. |
+| `tool.execute.after` | Counts output bytes from direct `@Raven` calls for accurate stats. |
 
 ### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
 

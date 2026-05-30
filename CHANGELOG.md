@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.4
+
+### Added
+- **Session tree visibility** — Raven sessions created by `raven_seek` now appear in the session tree (`Ctrl+X Down`) via `parentID` linking.
+
+### Changed
+- **`tool.execute.after`** — no longer a stub; now counts output bytes from direct `@Raven` task calls for accurate stats.
+
 ## 1.2.3
 
 ### Added
