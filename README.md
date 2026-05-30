@@ -40,42 +40,45 @@ Restart opencode.
 
 | Command | Action |
 |---------|--------|
-| `/raven` | Show status — enabled/disabled, current model |
-| `/raven on` | Enable search tool redirection to @raven (default) |
+| `/raven` | Show status — enabled/disabled, current model, reasoning effort |
+| `/raven on` | Enable search tool redirection (default) |
 | `/raven off` | Disable interception — all agents can use search tools directly |
-| `/raven model <name>` | Change Raven's model (e.g. `/raven model opencode/deepseek-v4-flash-free`) |
+| `/raven model <name>` | Change Raven's model (requires restart) |
+| `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
 
-Config persists across restarts in `raven-config.json` (next to your `opencode.jsonc`).
+Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
-## raven_seek — fallback for agents without task
+## raven_seek
 
-When search tools are blocked, agents are told to delegate to Raven via the `task` tool (`subagent_type="raven"`). This is the preferred path — the Raven subagent runs visibly in its own session, and you can see its work.
-
-Some agents have `task: deny` and can't delegate. **`raven_seek`** is the fallback for those agents — a custom tool that any agent can call directly, no `task` permission needed:
+When search tools are blocked, agents use **`raven_seek`** — a tool that creates a hidden Raven session, runs the search, and returns compact results:
 
 ```
 raven_seek(query: "how to use useEffect cleanup")
 ```
 
-The tool creates a Raven session behind the scenes, sends the query, and returns results. It's less visible than task delegation, so it's only used when task isn't available.
+The agent doesn't see Raven's internal tool calls — just the final findings. For parallel searches, pass multiple queries and each runs in its own Raven session via `Promise.all`.
 
 ## Configuration
 
 ### raven-config.json
 
-Created automatically on first toggle. Edit manually or use `/raven` commands:
+Located at `~/.config/opencode/raven-config.json`. Auto-created on first run. Edit manually or use `/raven` commands:
 
 ```json
 {
   "enabled": true,
-  "model": "opencode/deepseek-v4-flash-free"
+  "model": "opencode/deepseek-v4-flash-free",
+  "reasoning_effort": "low",
+  "excludeAgents": []
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Whether search tool interception is active |
-| `model` | *(built-in default)* | Override Raven's model without editing package files |
+| `model` | *(from Raven.md)* | Override Raven's model without editing package files |
+| `reasoning_effort` | *(from Raven.md)* | Override Raven's reasoning effort (e.g. `"low"`, `"medium"`, `"high"`) |
+| `excludeAgents` | `[]` | Agents that bypass search tool blocking (case-insensitive). e.g. `["librarian", "explorer"]` |
 
 ### MCP servers
 
@@ -117,11 +120,10 @@ To disable an MCP entirely:
 | Hook | What it does |
 |------|--------------|
 | `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
-| `tool` | Registers `raven_seek` — fallback tool for agents that can't use `task` |
-| `chat.message` | Tracks Raven's session IDs so its own tools aren't blocked |
-| `command.execute.before` | Handles `/raven on\|off\|model\|status` |
-| `tool.execute.before` | Throws to abort disabled tools before they execute — no wasted API calls |
-| `tool.execute.after` | Safety net: replaces output if the tool somehow still ran |
+| `tool` | Registers `raven_seek` — hidden Raven sessions with error recovery for API failures |
+| `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
+| `command.execute.before` | Handles `/raven on\|off\|model\|effort\|status` |
+| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Throttled: full message once per session, silent after. |
 
 ### Blocked tools (redirected for all agents except Raven itself)
 
@@ -129,7 +131,7 @@ To disable an MCP entirely:
 
 | Tool | Source |
 |------|--------|
-| `grep`, `glob` | Built-in |
+| `grep`, `glob`, `webfetch`, `fetch` | Built-in |
 | `websearch_web_search_exa` | WebSearch MCP |
 | `context7_resolve-library-id`, `context7_query-docs` | Context7 MCP |
 | `exa_web_search_exa`, `exa_web_fetch_exa`, `exa_web_search_advanced_exa` | Exa AI MCP |
@@ -145,7 +147,11 @@ To disable an MCP entirely:
 | Content search | `rg`, `grep`, `egrep`, `fgrep`, `git grep`, `ack`, `ag`, `findstr`, `Select-String` |
 | Filesystem exploration | `Get-ChildItem`, `gci`, `find -name`, `find -type`, `ls -R`, `dir /s` |
 
-**Unrestricted**: `webfetch`, `read`, `task`, `raven_seek`, and non-search `bash` commands.
+**Unrestricted**: `read`, `task`, `subtask`, `raven_seek`, and non-search `bash` commands.
+
+**Bash quote stripping**: Quoted content in bash commands is stripped before pattern matching — `echo "use grep here"` won't falsely trigger blocking.
+
+**Subagent guidance**: Every non-Raven, non-excluded subagent gets `<raven_guidance>` injected into its prompt at spawn time.
 
 ## Agent capabilities
 
