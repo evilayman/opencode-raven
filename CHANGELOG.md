@@ -4,9 +4,14 @@
 
 ### Fixed
 - **Piped bash output filters** — commands like `command | grep ...`, `command | rg ...`, `command | findstr ...`, and `command | head ...` are now allowed as bounded output filters instead of being rerouted to Raven.
+- **Raven recursion prevention** — `raven_seek` is denied inside the Raven agent so Raven cannot recursively call its own wrapper tool.
+- **Model recovery after blocked tools** — blocked tool errors now provide a short direct `raven_seek(query="...")` next-call hint using the attempted query/args.
+- **Bash false positives** — narrowed recursive/listing detection (`ls -r`, plain `cmd /c dir`, simple `Get-ChildItem`, comments, and bash descriptions no longer trigger blocking).
 
 ### Changed
 - **Bash search detection** — Raven still blocks primary discovery commands like `rg "foo" .`, `grep -R`, `find . -name`, `dir /s`, and `Get-ChildItem -Recurse`, but no longer treats simple pipeline filtering as a Raven-worthy search.
+- **Raven guidance** — `raven_seek` is described as the primary search/fetch/inspection tool, with explicit URL and command-output inspection support.
+- **MCP defaults** — Context7/Exa/Grep.app defaults now merge with existing user MCP config instead of overwriting custom headers, URLs, or disabled state.
 
 ## 1.2.5
 

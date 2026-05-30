@@ -87,10 +87,12 @@ You can call Raven directly with `@Raven` in any opencode chat. The Raven agent 
 
 ## raven_seek
 
-When search tools are blocked, agents use **`raven_seek`** — a unified tool that handles ALL search types (local codebase, web, docs, GitHub examples). Output includes elapsed time and tokens processed.
+When search, fetch, or discovery tools are blocked, agents use **`raven_seek`** — a unified tool that handles local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection. Output includes elapsed time and tokens processed.
 
 ```
 raven_seek(query: "how to use useEffect cleanup")
+raven_seek(query: "Fetch/read https://example.com and summarize install steps")
+raven_seek(query: "Check whether archivemount/libarchive supports ISO or UDF. Use docs, web, or command output as needed.")
 ```
 
 The agent doesn't see Raven's internal tool calls — just the final findings. Raven parallelizes independent searches internally within a single session.
@@ -132,6 +134,8 @@ All three MCPs work without API keys. Add keys for higher rate limits:
 | Exa AI | `https://mcp.exa.ai/mcp` | Free key at [exa.ai](https://exa.ai) — higher limits |
 | Grep.app | `https://mcp.grep.app` | Not available — public API, no key needed |
 
+Raven merges these MCP defaults with your existing `opencode.jsonc` settings, preserving custom headers, URLs, and `enabled: false` overrides.
+
 To add an API key, override the MCP in your `opencode.jsonc` with a `headers` field:
 
 ```jsonc
@@ -161,11 +165,11 @@ To disable an MCP entirely:
 
 | Hook | What it does |
 |------|--------------|
-| `config` | Registers Raven agent, adds Context7/Exa/Grep.app MCPs, loads MCP guidance |
+| `config` | Registers Raven agent, merges Context7/Exa/Grep.app MCP defaults, loads MCP guidance |
 | `tool` | Registers `raven_seek` — creates Raven sessions with timeout, error recovery, timing, and session tree visibility. Tracks context processed for stats (both `raven_seek` and direct `@Raven`). |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
-| `command.execute.before` | Handles `/raven on\|off\|model\|effort\|timeout\|stats\|status` |
-| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Injects `<raven_guidance>` into subagent prompts. |
+| `command.execute.before` | Handles `/raven on\|off\|update\|model\|effort\|timeout\|stats\|status` |
+| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Error output gives the next `raven_seek(query="...")` call. Injects concise `<raven_guidance>` into subagent prompts. |
 | `tool.execute.after` | Counts output bytes from direct `@Raven` calls for accurate stats. |
 
 ### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
@@ -183,19 +187,21 @@ To disable an MCP entirely:
 | `exa_deep_researcher_start`, `exa_deep_researcher_check`, `exa_deep_search_exa` | Exa AI MCP |
 | `grep_app_searchGitHub` | Grep.app MCP |
 
-**Bash commands** — intercepted when the command or description matches a search pattern:
+**Bash commands** — intercepted when the command matches a primary search/discovery pattern:
 
 | Pattern | Examples |
 |---------|----------|
 | Content search | `rg`, `grep`, `egrep`, `fgrep`, `git grep`, `ack`, `ag`, `findstr`, `Select-String` |
-| Filesystem exploration | `Get-ChildItem`, `gci`, `find -name`, `find -type`, `ls -R`, `dir /s` |
-| Shell bypass | `cmd /c dir`, `cmd /c findstr`, `cmd /c find`, `cmd /c where`, `cmd /c tree` |
+| Filesystem exploration | `Get-ChildItem -Recurse`, `gci -Recurse`, `Get-ChildItem -Filter`, `find -name`, `find -type`, `ls -R`, `ls --recursive`, `dir /s` |
+| Shell bypass | `cmd /c dir /s`, `cmd /c findstr`, `cmd /c find`, `cmd /c tree` |
 
-**Unrestricted**: `read`, `task`, `subtask`, `raven_seek`, and non-search `bash` commands.
+**Unrestricted for non-Raven agents**: `read`, `task`, `subtask`, `raven_seek`, and non-search `bash` commands.
 
 **Allowed output filters**: Piped filters like `command | grep ...`, `command | rg ...`, `command | findstr ...`, and `command | head ...` are allowed. Raven only blocks search commands when they are used as primary discovery commands, not when they filter bounded output from another command.
 
 **Bash quote stripping**: Quoted content in bash commands is stripped before pattern matching — `echo "use grep here"` won't falsely trigger blocking.
+
+**Comment stripping**: Shell comments are stripped before matching — `# use grep later` won't falsely trigger blocking.
 
 **Subagent guidance**: Every non-Raven, non-excluded subagent gets `<raven_guidance>` injected into its prompt at spawn time.
 
@@ -211,6 +217,8 @@ Raven itself has access to these tools (blocked for other agents by the plugin):
 | Context7 | Library/framework/SDK/API docs |
 | Exa AI | Web search, news, pages, products |
 | Grep.app | Public GitHub examples |
+
+`raven_seek` is denied inside Raven itself so Raven cannot recursively call its own wrapper tool. Raven uses direct tools/MCPs instead.
 
 Raven returns compact findings: answer, sources, relevant details, recommended next step, and uncertainty.
 

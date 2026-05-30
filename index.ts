@@ -43,17 +43,24 @@ const SEARCH_TOOLS = [
 ]
 
 // ── Bash commands that look like search workarounds ──
-const SEARCH_BASH_RE = /\b(rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String|Get-ChildItem|gci\b|dir\b\s+[/-][sS]|ls\b\s+-[rR]|find\b\s+.*-name|find\b\s+.*-type)\b/i
+const SEARCH_BASH_RE = /\b(?:rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String)\b|\b(?:Get-ChildItem|gci)\b(?=[^|;&\n]*(?:-Recurse|-Filter|-Include|\s-[A-Za-z]*r[A-Za-z]*\b))|\bdir\b(?=[^|;&\n]*(?:[/-][sS]\b|-Recurse|-Filter|-Include))|\bls\b(?=[^|;&\n]*(?:\s-[A-Za-z]*R[A-Za-z]*\b|--recursive\b))|\bfind\b\s+.*(?:-name|-type)\b/i
 
 // Strip quoted content to avoid false positives (e.g. echo "use grep here")
 function stripHeredocs(cmd: string): string {
   return cmd.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?\n\s*\1/g, "")
 }
 
+function stripShellComments(cmd: string): string {
+  return cmd
+    .split("\n")
+    .map((line) => line.replace(/(^|\s)#.*$/, "$1").trimEnd())
+    .join("\n")
+}
+
 function stripQuotedContent(cmd: string): string {
-  return stripHeredocs(cmd)
+  return stripShellComments(stripHeredocs(cmd)
     .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""')
+    .replace(/"[^"]*"/g, '""'))
 }
 
 function splitPipelineSegments(cmd: string): string[] {
@@ -85,7 +92,8 @@ function hasSearchAfterCommandSeparator(segment: string): boolean {
 
 function commandLooksLikeSearch(cmd: string): boolean {
   const lower = cmd.toLowerCase().trim()
-  if (/^cmd\s+\/c\s+"?(dir|findstr|find|where|tree)\b/.test(lower)) return true
+  if (/^cmd\s+\/c\s+"?(?:findstr|find|tree)\b/.test(lower)) return true
+  if (/^cmd\s+\/c\s+"?dir\b[^\n]*\s\/s\b/.test(lower)) return true
 
   return splitPipelineSegments(cmd).some((segment, index) => {
     // Allow bounded filters over output already produced by the previous command:
@@ -101,8 +109,7 @@ function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
   const raw = String(args?.command ?? "")
   const cmd = stripQuotedContent(raw)
-  const desc = stripQuotedContent(String(args?.description ?? ""))
-  return commandLooksLikeSearch(cmd) || (!cmd.includes("|") && SEARCH_BASH_RE.test(desc))
+  return commandLooksLikeSearch(cmd)
 }
 
 // ── Config file shape ──
@@ -264,7 +271,19 @@ export default ((input: PluginInput) => {
     return config.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
-  const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") for all searches — local codebase, web, docs, and GitHub examples."
+  const RAVEN_GUIDANCE = `Search/fetch tools are blocked by Raven. If one is blocked, your next tool call should be raven_seek(query="<same search/fetch request>").`
+
+  function attemptedQuery(tool: string, args: any): string {
+    if (!args || typeof args !== "object") return `${tool}: ${JSON.stringify(args)}`
+    const direct = args.query ?? args.pattern ?? args.url ?? args.urls ?? args.command ?? args.path ?? args.filePath
+    const value = direct !== undefined ? direct : args
+    const text = typeof value === "string" ? value : JSON.stringify(value)
+    return text.length > 500 ? `${text.slice(0, 497)}...` : text
+  }
+
+  function rerouteMessage(tool: string, args: any): string {
+    return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_seek(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
+  }
 
   // ── Context processed by raven_seek ──
   let sessionBytes = 0
@@ -329,7 +348,7 @@ export default ((input: PluginInput) => {
   }
 
   function manualUpdateText(latest = "latest"): string {
-    return `Restart opencode to load the update.\n\nManual alternatives:\n  bun add ${PACKAGE_NAME}@${latest}\n  npm install ${PACKAGE_NAME}@${latest}\n\nIf opencode still loads the old version, clear its plugin cache and restart:\n  PowerShell: Remove-Item -Recurse -Force "$HOME\\.cache\\opencode\\packages\\${PACKAGE_NAME}*"\n  macOS/Linux: rm -rf ~/.cache/opencode/packages/${PACKAGE_NAME}*`
+    return `Restart opencode to load the update.\n\nManual alternatives:\n  bun update --latest ${PACKAGE_NAME}\n  npm install ${PACKAGE_NAME}@${latest}\n\nIf opencode still loads the old version, clear its plugin cache and restart:\n  PowerShell: Remove-Item -Recurse -Force "$HOME\\.cache\\opencode\\packages\\${PACKAGE_NAME}*"\n  macOS/Linux: rm -rf ~/.cache/opencode/packages/${PACKAGE_NAME}*`
   }
 
   async function notifyIfUpdateAvailable() {
@@ -347,19 +366,26 @@ export default ((input: PluginInput) => {
     } catch { /* update checks are best-effort */ }
   }
 
+  function ensureRemoteMcp(configInput: any, key: string, url: string) {
+    const existing = configInput.mcp?.[key] && typeof configInput.mcp[key] === "object"
+      ? configInput.mcp[key]
+      : {}
+    const type = existing.type ?? "remote"
+    configInput.mcp[key] = {
+      ...existing,
+      type,
+      ...(type === "local" ? {} : { url: existing.url ?? url }),
+      enabled: existing.enabled ?? true,
+    }
+  }
+
   return {
     config(configInput: any) {
       // MCP servers
       configInput.mcp = configInput.mcp || {}
-      configInput.mcp.context7 = {
-        type: "remote", url: "https://mcp.context7.com/mcp", enabled: true,
-      }
-      configInput.mcp.exa = {
-        type: "remote", url: "https://mcp.exa.ai/mcp", enabled: true,
-      }
-      configInput.mcp.grep_app = {
-        type: "remote", url: "https://mcp.grep.app", enabled: true,
-      }
+      ensureRemoteMcp(configInput, "context7", "https://mcp.context7.com/mcp")
+      ensureRemoteMcp(configInput, "exa", "https://mcp.exa.ai/mcp")
+      ensureRemoteMcp(configInput, "grep_app", "https://mcp.grep.app")
 
       // Inject MCP guidance as a startup instruction file (absolute path for npm compat)
       configInput.instructions = configInput.instructions || []
@@ -397,9 +423,9 @@ export default ((input: PluginInput) => {
     // Register raven_seek tool — lets agents with task:false still search through Raven
     tool: {
       "raven_seek": tool({
-        description: "Unified search tool — use only when task delegation to Raven (subagent_type=\"raven\") is unavailable. Handles ALL searches: local codebase, web, docs, and GitHub examples via Context7, Exa AI, and Grep.app.",
+        description: "Unified Raven search/fetch/inspection tool. Use this whenever grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, or search-like bash would be used. Handles local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
         args: {
-          query: tool.schema.string().describe("What to search for — be specific about what you need (docs, code examples, web info, etc.)"),
+          query: tool.schema.string().describe("What Raven should search, fetch, read, or inspect. Include exact URLs when replacing WebFetch. Include commands/output checks when replacing grep/rg/head over command output."),
         },
         async execute(args, context) {
           const started = Date.now()
@@ -417,6 +443,8 @@ export default ((input: PluginInput) => {
             if (!sessionId) {
               return { title: "Raven Seek", output: "Failed to create Raven session." }
             }
+
+            ravenSessions.add(sessionId)
 
             // Emit sessionId so the TUI renders a clickable delegation box
             context.metadata({ metadata: { sessionId } })
@@ -550,6 +578,10 @@ export default ((input: PluginInput) => {
     },
 
     "tool.execute.before"(input: any, output: any) {
+      if (input.tool === "raven_seek" && (ravenSessions.has(input.sessionID) || sessionAgents.get(input.sessionID) === "raven")) {
+        throw new Error("raven_seek is disabled inside Raven. Use Raven's direct search/fetch tools instead.")
+      }
+
       if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
       if (isExcluded(sessionAgents.get(input.sessionID))) return
@@ -565,7 +597,7 @@ export default ((input: PluginInput) => {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
           ) ?? "prompt"
-          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, ls, dir, bash search commands) are blocked. Use raven_seek(query=\"...\") for ALL searches — local codebase, web, docs, and GitHub examples.\n</raven_guidance>`
+          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\n${RAVEN_GUIDANCE}\n</raven_guidance>`
         }
       }
 
@@ -574,7 +606,7 @@ export default ((input: PluginInput) => {
       const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
 
       if (isSearchTool || isSearchBashCmd) {
-        throw new Error(REROUTE_MSG)
+        throw new Error(rerouteMessage(input.tool, output.args || input.args))
       }
     },
 
