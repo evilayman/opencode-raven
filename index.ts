@@ -68,6 +68,7 @@ interface RavenConfig {
   reasoning_effort?: string
   excludeAgents?: string[]
   excludeTools?: string[]
+  timeout?: number
   stats?: { bytes: number }
 }
 
@@ -81,6 +82,7 @@ const DEFAULT_CONFIG: RavenConfig = {
   reasoning_effort: fm.reasoning_effort,
   excludeAgents: [],
   excludeTools: [],
+  timeout: 180,
 }
 
 function parseRavenMd(raw: string): { frontmatter: Record<string, any>; prompt: string } {
@@ -176,6 +178,7 @@ export default ((input: PluginInput) => {
           reasoning_effort: raw.reasoning_effort,
           excludeAgents: Array.isArray(raw.excludeAgents) ? raw.excludeAgents : [],
           excludeTools: Array.isArray(raw.excludeTools) ? raw.excludeTools : [],
+          timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
           stats: raw.stats || undefined,
         }
       }
@@ -280,6 +283,8 @@ export default ((input: PluginInput) => {
           query: tool.schema.string().describe("What to search for — be specific about what you need (docs, code examples, web info, etc.)"),
         },
         async execute(args, context) {
+          const started = Date.now()
+          const timeout = (config.timeout ?? 180) * 1000
           try {
             // Create a Raven session
             const session = await client.session.create({
@@ -291,14 +296,21 @@ export default ((input: PluginInput) => {
               return { title: "Raven Seek", output: "Failed to create Raven session." }
             }
 
-            // Send the query to Raven
-            const result = await client.session.prompt({
-              path: { id: sessionId },
-              body: {
-                agent: "raven",
-                parts: [{ type: "text", text: args.query }],
-              },
-            })
+            // Send the query to Raven with timeout
+            const result = await Promise.race([
+              client.session.prompt({
+                path: { id: sessionId },
+                body: {
+                  agent: "raven",
+                  parts: [{ type: "text", text: args.query }],
+                },
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`Raven timed out after ${timeout / 1000}s — session kept: ${sessionId}`)), timeout)
+              ),
+            ])
+
+            const elapsed = ((Date.now() - started) / 1000).toFixed(1)
 
             // Extract text from the response
             const parts = (result as any)?.data?.parts ?? []
@@ -315,17 +327,18 @@ export default ((input: PluginInput) => {
             // Track context saved
             addBytes(output.length)
 
-            return { title: "Raven Seek", output }
+            return { title: "Raven Seek", output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(output.length)}, ~${formatTokens(output.length)} tokens*` }
           } catch (err: any) {
+            const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
             const hint =
               /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
               : /quota|usage.?limit|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota exhausted — proceed without search, tell user what's missing."
               : /token|context.?length|too large|too long/i.test(msg) ? "Raven query too large — shorten your query and retry."
               : /model|unavailable|down|not found/i.test(msg) ? "Raven model unavailable — retry later, or proceed without search."
-              : /timeout|timed.?out|econnrefused/i.test(msg) ? "Raven timed out — retry with a narrower query."
+              : /timeout|timed.?out|session kept/i.test(msg) ? err.message
               : `Raven search failed. Proceed without search — note gaps for the user. [${err.message || err}]`
-            return { title: "Raven Seek", output: hint }
+            return { title: "Raven Seek", output: `${hint}\n\n*Attempt took ${elapsed}s*` }
           }
         },
       }),
@@ -341,7 +354,7 @@ export default ((input: PluginInput) => {
       }
     },
 
-    // /raven on|off|model <name>|status
+    // /raven on|off|model <name>|effort <value>|timeout <seconds>|stats|status
     "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
       output.parts.length = 0
@@ -376,11 +389,21 @@ export default ((input: PluginInput) => {
           saveConfig(config)
           output.parts.push({ type: "text", text: `Raven reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
         }
+      } else if (arg.startsWith("timeout ")) {
+        const secs = parseInt(raw.slice(8).trim(), 10)
+        if (!secs || secs < 10) {
+          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be at least 10. Current: ${config.timeout ?? 180}s` })
+        } else {
+          config.timeout = secs
+          saveConfig(config)
+          output.parts.push({ type: "text", text: `Raven timeout set to ${secs}s. Takes effect immediately.` })
+        }
       } else {
         const enabled = config.enabled ? "enabled" : "disabled"
         const model = config.model || fm.model || "(default)"
         const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven stats   — show blocked calls and context saved` })
+        const timeout = config.timeout ?? 180
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
       }
     },
 
