@@ -1,7 +1,8 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
+import { homedir } from "node:os"
 
 // ── Resolve paths relative to this package (works in node_modules/) ──
 const PKG_DIR = import.meta.dirname!
@@ -14,6 +15,8 @@ const SEARCH_TOOLS = [
   // Built-in tools
   "grep",
   "glob",
+  "webfetch",
+  "fetch",
   // WebSearch MCP
   "websearch_web_search_exa",
   // Context7 MCP
@@ -38,10 +41,21 @@ const SEARCH_TOOLS = [
 // ── Bash commands that look like search workarounds ──
 const SEARCH_BASH_RE = /\b(rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String|Get-ChildItem|gci\b|dir\b\s+[/-][sS]|ls\b\s+-[rR]|find\b\s+.*-name|find\b\s+.*-type)\b/
 
+// Strip quoted content to avoid false positives (e.g. echo "use grep here")
+function stripHeredocs(cmd: string): string {
+  return cmd.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?\n\s*\1/g, "")
+}
+
+function stripQuotedContent(cmd: string): string {
+  return stripHeredocs(cmd)
+    .replace(/'[^']*'/g, "''")
+    .replace(/"[^"]*"/g, '""')
+}
+
 function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
-  const cmd = String(args?.command ?? "")
-  const desc = String(args?.description ?? "")
+  const cmd = stripQuotedContent(String(args?.command ?? ""))
+  const desc = stripQuotedContent(String(args?.description ?? ""))
   return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc)
 }
 
@@ -49,13 +63,20 @@ function isSearchBash(tool: string, args: any): boolean {
 interface RavenConfig {
   enabled: boolean
   model?: string
+  reasoning_effort?: string
+  excludeAgents?: string[]
 }
-
-const DEFAULT_CONFIG: RavenConfig = { enabled: true }
 
 // ── Parse Raven.md frontmatter ──
 const ravenMd = readFileSync(RAVEN_MD, "utf-8")
 const { frontmatter: fm, prompt: ravenPrompt } = parseRavenMd(ravenMd)
+
+const DEFAULT_CONFIG: RavenConfig = {
+  enabled: true,
+  model: fm.model,
+  reasoning_effort: fm.reasoning_effort,
+  excludeAgents: [],
+}
 
 function parseRavenMd(raw: string): { frontmatter: Record<string, any>; prompt: string } {
   const parts = raw.split("---")
@@ -137,8 +158,8 @@ function extractOptions(fm: Record<string, any>): Record<string, any> {
 export default ((input: PluginInput) => {
   const client = input.client
 
-  // Config file lives in the project directory (next to opencode.jsonc)
-  const configFile = join(input.directory, "raven-config.json")
+  // Config file lives in the global opencode config directory
+  const configFile = join(homedir(), ".config", "opencode", "raven-config.json")
 
   function loadConfig(): RavenConfig {
     try {
@@ -147,20 +168,33 @@ export default ((input: PluginInput) => {
         return {
           enabled: raw.enabled !== false,
           model: raw.model,
+          reasoning_effort: raw.reasoning_effort,
+          excludeAgents: Array.isArray(raw.excludeAgents) ? raw.excludeAgents : [],
         }
       }
     } catch { /* ignore corruption, use defaults */ }
+    // Auto-create config file with defaults on first run
+    saveConfig(DEFAULT_CONFIG)
     return { ...DEFAULT_CONFIG }
   }
 
   function saveConfig(config: RavenConfig) {
     try {
+      mkdirSync(join(homedir(), ".config", "opencode"), { recursive: true })
       writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n")
     } catch { /* non-fatal: config won't persist but toggle still works in-session */ }
   }
 
   let config = loadConfig()
   const ravenSessions = new Set<string>()
+  const sessionAgents = new Map<string, string>()
+
+  // ── Check if an agent is excluded from Raven enforcement (case-insensitive) ──
+  function isExcluded(agent: string | undefined): boolean {
+    if (!agent || !config.excludeAgents?.length) return false
+    const lower = agent.toLowerCase()
+    return config.excludeAgents.some((a) => a.toLowerCase() === lower)
+  }
 
   // Throttle: show the full error message once per session, then silent
   const throttledSessions = new Set<string>()
@@ -193,7 +227,10 @@ export default ((input: PluginInput) => {
         mode: fm.mode || "subagent",
         hidden: fm.hidden !== undefined ? fm.hidden : false,
         model: config.model || fm.model,
-        options: extractOptions(fm),
+        options: {
+          ...extractOptions(fm),
+          ...(config.reasoning_effort ? { reasoning_effort: config.reasoning_effort } : {}),
+        },
         permission: fm.permission || {},
         prompt: ravenPrompt,
       }
@@ -264,10 +301,13 @@ export default ((input: PluginInput) => {
       }),
     },
 
-    // Track Raven sessions so we don't block its own tools
+    // Track agent ↔ session mapping for allowlist + Raven exclusion
     "chat.message"(input: any, _output: any) {
-      if (input.agent === "raven") {
-        ravenSessions.add(input.sessionID)
+      if (input.agent) {
+        sessionAgents.set(input.sessionID, input.agent)
+        if (input.agent === "raven") {
+          ravenSessions.add(input.sessionID)
+        }
       }
     },
 
@@ -295,21 +335,32 @@ export default ((input: PluginInput) => {
           saveConfig(config)
           output.parts.push({ type: "text", text: `Raven model set to: ${model}\nRestart opencode for the change to take effect.` })
         }
+      } else if (arg.startsWith("effort ")) {
+        const effort = raw.slice(7).trim()
+        if (!effort) {
+          output.parts.push({ type: "text", text: `Usage: /raven effort <value>\nCurrent: ${config.reasoning_effort || fm.reasoning_effort || "(default)"}` })
+        } else {
+          config.reasoning_effort = effort
+          saveConfig(config)
+          output.parts.push({ type: "text", text: `Raven reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
+        }
       } else {
         const enabled = config.enabled ? "enabled" : "disabled"
         const model = config.model || fm.model || "(default)"
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)` })
+        const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)` })
       }
     },
 
     "tool.execute.before"(input: any, output: any) {
       if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
+      if (isExcluded(sessionAgents.get(input.sessionID))) return
 
       // ── Subagent prompt injection: inject Raven guidance into every subagent ──
       if ((input.tool === "task" || input.tool === "subtask") && output.args) {
         const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
-        if (subagentType !== "raven") {
+        if (subagentType !== "raven" && !isExcluded(subagentType)) {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
           ) ?? "prompt"
