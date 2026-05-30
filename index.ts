@@ -382,12 +382,14 @@ export default ((input: PluginInput) => {
       } else if (arg === "stats") {
         const session = sessionStats.get(input.sessionID)
         const sessionStr = !session || session.blocked === 0
-          ? "  No blocks this session."
-          : `  Session: ${session.blocked} blocked, ~${formatBytes(session.bytesSaved)} (~${formatTokens(session.bytesSaved)} tokens)`
+          ? "  This session: no blocks yet."
+          : `  This session: ${session.blocked} blocked, ~${formatBytes(session.bytesSaved)} (~${formatTokens(session.bytesSaved)} tokens)`
         const globalStr = globalStats.blocked === 0
-          ? "  Global: no blocks yet."
-          : `  Global: ${globalStats.blocked} blocked, ~${formatBytes(globalStats.bytesSaved)} (~${formatTokens(globalStats.bytesSaved)} tokens)`
-        output.parts.push({ type: "text", text: `Raven stats:\n${sessionStr}\n${globalStr}` })
+          ? "  All sessions: no blocks yet."
+          : `  All sessions: ${globalStats.blocked} blocked, ~${formatBytes(globalStats.bytesSaved)} (~${formatTokens(globalStats.bytesSaved)} tokens)`
+        const tools = [...globalStats.tools.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+        const toolsStr = tools.length ? "\nTop blocked tools:\n" + tools.map(([t, n]) => `  ${t} — ${n} call${n > 1 ? "s" : ""}`).join("\n") : ""
+        output.parts.push({ type: "text", text: `Raven stats:\n${sessionStr}\n${globalStr}${toolsStr}` })
       } else if (arg.startsWith("model ")) {
         const model = raw.slice(6).trim()
         if (!model) {
