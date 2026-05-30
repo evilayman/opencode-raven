@@ -135,7 +135,7 @@ To disable an MCP entirely:
 
 | Tool | Source |
 |------|--------|
-| `grep`, `glob`, `webfetch`, `fetch` | Built-in |
+| `grep`, `glob`, `webfetch`, `fetch`, `websearch` | Built-in |
 | `websearch_web_search_exa` | WebSearch MCP |
 | `context7_resolve-library-id`, `context7_query-docs` | Context7 MCP |
 | `exa_web_search_exa`, `exa_web_fetch_exa`, `exa_web_search_advanced_exa` | Exa AI MCP |
