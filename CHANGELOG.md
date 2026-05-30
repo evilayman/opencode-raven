@@ -3,7 +3,6 @@
 ## 1.2.2
 
 ### Added
-- **`excludeTools`** — per-tool allowlist in config. Tools listed never get blocked.
 - **`websearch`** — built-in web search tool now intercepted.
 - **Session + global stats** — session counter (resets on restart) and all-time counter (persists).
 
