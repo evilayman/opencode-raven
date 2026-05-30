@@ -5,7 +5,7 @@
 <td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
 <strong>Search-first subagent for <a href="https://opencode.ai">opencode</a></strong><br/>
-Intercepts search tool calls and routes them to a dedicated <strong>@raven</strong> agent with Context7, Exa AI, and Grep.app MCPs.
+Intercepts search tool calls and routes them to a hidden Raven agent with Context7, Exa AI, and Grep.app MCPs.
 </td>
 </tr>
 </table>
@@ -16,7 +16,7 @@ Search is the most common thing agents do — and the most wasteful. Every searc
 
 1. **Cost** — Use a free model like `opencode/deepseek-v4-flash-free` for all search, saving your expensive model's context for actual work.
 2. **Reliability** — Hard-enforced interception. Other plugins suggest delegation; Raven *blocks* search tools for non-Raven agents and redirects them. No more agents ignoring your instructions and searching directly.
-3. **Simplicity** — One plugin, one agent, zero config. No bundled agents or features you don't need. Works with any agent or workflow. Just add it to `opencode.jsonc` and restart.
+3. **Simplicity** — One plugin, one agent, auto-configured. No bundled agents or features you don't need. Works with any agent or workflow. Just add it to `opencode.jsonc` and restart.
 
 ## Install
 
@@ -56,7 +56,7 @@ When search tools are blocked, agents use **`raven_seek`** — a tool that creat
 raven_seek(query: "how to use useEffect cleanup")
 ```
 
-The agent doesn't see Raven's internal tool calls — just the final findings. For parallel searches, pass multiple queries and each runs in its own Raven session via `Promise.all`.
+The agent doesn't see Raven's internal tool calls — just the final findings. Raven parallelizes independent searches internally within a single session.
 
 ## Configuration
 
@@ -125,7 +125,7 @@ To disable an MCP entirely:
 | `command.execute.before` | Handles `/raven on\|off\|model\|effort\|status` |
 | `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Throttled: full message once per session, silent after. |
 
-### Blocked tools (redirected for all agents except Raven itself)
+### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
 
 **Dedicated search tools:**
 
