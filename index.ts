@@ -67,7 +67,7 @@ interface RavenConfig {
   reasoning_effort?: string
   excludeAgents?: string[]
   excludeTools?: string[]
-  stats?: { blocked: number; bytesSaved: number; tools: Record<string, number> }
+  stats?: { bytes: number }
 }
 
 // ── Parse Raven.md frontmatter ──
@@ -204,41 +204,12 @@ export default ((input: PluginInput) => {
 
   const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
 
-  // ── Session stats: track blocked calls + estimated context saved ──
-  const sessionStats = new Map<string, { blocked: number; tools: Map<string, number>; bytesSaved: number }>()
-  const globalStats = { blocked: 0, tools: new Map<string, number>(), bytesSaved: 0 }
-  // Restore global stats from config
-  if (config.stats) {
-    globalStats.blocked = config.stats.blocked ?? 0
-    globalStats.bytesSaved = config.stats.bytesSaved ?? 0
-    for (const [t, n] of Object.entries(config.stats.tools ?? {})) {
-      globalStats.tools.set(t, n)
-    }
-  }
+  // ── Context processed by raven_seek ──
+  let totalBytes = config.stats?.bytes ?? 0
 
-  // Running averages from actual tool output measurements (calibrated in tool.execute.after)
-  const toolAverages = new Map<string, number>()
-
-  function getBytesEstimate(tool: string): number {
-    return Math.round(toolAverages.get(tool) ?? 0)
-  }
-
-  function trackBlock(sessionID: string, tool: string) {
-    // Session stats
-    let stats = sessionStats.get(sessionID)
-    if (!stats) {
-      stats = { blocked: 0, tools: new Map(), bytesSaved: 0 }
-      sessionStats.set(sessionID, stats)
-    }
-    stats.blocked++
-    stats.tools.set(tool, (stats.tools.get(tool) ?? 0) + 1)
-    stats.bytesSaved += getBytesEstimate(tool)
-    // Global stats
-    globalStats.blocked++
-    globalStats.tools.set(tool, (globalStats.tools.get(tool) ?? 0) + 1)
-    globalStats.bytesSaved += getBytesEstimate(tool)
-    // Persist to config
-    config.stats = { blocked: globalStats.blocked, bytesSaved: globalStats.bytesSaved, tools: Object.fromEntries(globalStats.tools) }
+  function addBytes(bytes: number) {
+    totalBytes += bytes
+    config.stats = { bytes: totalBytes }
     saveConfig(config)
   }
 
@@ -338,6 +309,9 @@ export default ((input: PluginInput) => {
               await client.session.delete({ path: { id: sessionId } })
             } catch { /* non-fatal */ }
 
+            // Track context saved
+            addBytes(output.length)
+
             return { title: "Raven Seek", output }
           } catch (err: any) {
             const msg = String(err?.message ?? err ?? "").toLowerCase()
@@ -380,16 +354,7 @@ export default ((input: PluginInput) => {
         saveConfig(config)
         output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
       } else if (arg === "stats") {
-        const session = sessionStats.get(input.sessionID)
-        const sessionStr = !session || session.blocked === 0
-          ? "  This session: no blocks yet."
-          : `  This session: ${session.blocked} blocked, ~${formatBytes(session.bytesSaved)} (~${formatTokens(session.bytesSaved)} tokens)`
-        const globalStr = globalStats.blocked === 0
-          ? "  All sessions: no blocks yet."
-          : `  All sessions: ${globalStats.blocked} blocked, ~${formatBytes(globalStats.bytesSaved)} (~${formatTokens(globalStats.bytesSaved)} tokens)`
-        const tools = [...globalStats.tools.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
-        const toolsStr = tools.length ? "\nTop blocked tools:\n" + tools.map(([t, n]) => `  ${t} — ${n} call${n > 1 ? "s" : ""}`).join("\n") : ""
-        output.parts.push({ type: "text", text: `Raven stats:\n${sessionStr}\n${globalStr}${toolsStr}` })
+        output.parts.push({ type: "text", text: `Raven context processed: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
       } else if (arg.startsWith("model ")) {
         const model = raw.slice(6).trim()
         if (!model) {
@@ -438,23 +403,12 @@ export default ((input: PluginInput) => {
       const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
 
       if (isSearchTool || isSearchBashCmd) {
-        trackBlock(input.sessionID, isSearchBashCmd ? "bash(search)" : input.tool)
         throw new Error(REROUTE_MSG)
       }
     },
 
     "tool.execute.after"(input: any, output: any) {
-      // Measure actual search tool output to calibrate byte estimates
-      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
-      const isSearchBashCmd = isSearchBash(input.tool, input.args || output.args)
-      if (!isSearchTool && !isSearchBashCmd) return
-
-      const body = output.output
-      if (typeof body === "string" && body.length > 0) {
-        // Exponential moving average: 90% old, 10% new
-        const prev = toolAverages.get(input.tool) ?? body.length
-        toolAverages.set(input.tool, prev * 0.9 + body.length * 0.1)
-      }
+      // Context saved is tracked in raven_seek instead
     },
   }
 }) satisfies Plugin
