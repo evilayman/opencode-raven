@@ -127,7 +127,7 @@ To disable an MCP entirely:
 | `tool` | Registers `raven_seek` — hidden Raven sessions with error recovery for API failures |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
 | `command.execute.before` | Handles `/raven on\|off\|model\|effort\|status` |
-| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Throttled: full message once per session, silent after. Tracks blocked calls + context saved. |
+| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Tracks blocked calls + context saved. |
 
 ### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
 

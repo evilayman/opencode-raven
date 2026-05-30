@@ -17,6 +17,7 @@ const SEARCH_TOOLS = [
   "glob",
   "webfetch",
   "fetch",
+  "websearch",
   // WebSearch MCP
   "websearch_web_search_exa",
   // Context7 MCP
@@ -201,8 +202,6 @@ export default ((input: PluginInput) => {
     return config.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
-  // Throttle: show the full error message once per session, then silent
-  const throttledSessions = new Set<string>()
   const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
 
   // ── Session stats: track blocked calls + estimated context saved ──
@@ -217,21 +216,11 @@ export default ((input: PluginInput) => {
     }
   }
 
+  // Running averages from actual tool output measurements (calibrated in tool.execute.after)
+  const toolAverages = new Map<string, number>()
+
   function getBytesEstimate(tool: string): number {
-    const ESTIMATES: Record<string, number> = {
-      grep: 2000, glob: 2000,
-      webfetch: 16000, fetch: 16000,
-      websearch_web_search_exa: 8000,
-      context7_resolve_library_id: 1000, context7_query_docs: 4000,
-      exa_web_search_exa: 8000, exa_web_fetch_exa: 16000,
-      exa_web_search_advanced_exa: 8000, exa_company_research_exa: 8000,
-      exa_crawling_exa: 12000, exa_people_search_exa: 6000,
-      exa_linkedin_search_exa: 6000, exa_get_code_context_exa: 4000,
-      exa_deep_researcher_start: 8000, exa_deep_researcher_check: 2000,
-      exa_deep_search_exa: 8000,
-      grep_app_searchGitHub: 4000,
-    }
-    return ESTIMATES[tool] ?? 2000 // default for bash search / unknown
+    return Math.round(toolAverages.get(tool) ?? 0)
   }
 
   function trackBlock(sessionID: string, tool: string) {
@@ -448,16 +437,22 @@ export default ((input: PluginInput) => {
 
       if (isSearchTool || isSearchBashCmd) {
         trackBlock(input.sessionID, isSearchBashCmd ? "bash(search)" : input.tool)
-        if (throttledSessions.has(input.sessionID)) {
-          throw new Error("")
-        }
-        throttledSessions.add(input.sessionID)
         throw new Error(REROUTE_MSG)
       }
     },
 
     "tool.execute.after"(input: any, output: any) {
-      // Reserved for future analytics / redirect tracking (#5)
+      // Measure actual search tool output to calibrate byte estimates
+      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
+      const isSearchBashCmd = isSearchBash(input.tool, input.args || output.args)
+      if (!isSearchTool && !isSearchBashCmd) return
+
+      const body = output.output
+      if (typeof body === "string" && body.length > 0) {
+        // Exponential moving average: 90% old, 10% new
+        const prev = toolAverages.get(input.tool) ?? body.length
+        toolAverages.set(input.tool, prev * 0.9 + body.length * 0.1)
+      }
     },
   }
 }) satisfies Plugin
