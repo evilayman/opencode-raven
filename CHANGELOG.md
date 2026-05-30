@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.5
+
+### Added
+- **`/raven update`** — checks npm for a newer Raven version, clears opencode's cached Raven plugin package when needed, and prompts the user to restart.
+- **Startup update notification** — Raven checks npm at startup and shows a TUI toast when an update is available.
+- **Config auto-migration** — existing `raven-config.json` files are normalized on startup so newly-added default fields are populated automatically.
+
+### Changed
+- **Update docs** — README now includes `/raven update`, manual `bun`/`npm` update commands, and opencode cache-clearing instructions.
+
 ## 1.2.4
 
 ### Added

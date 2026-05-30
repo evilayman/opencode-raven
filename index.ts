@@ -1,6 +1,6 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { homedir, tmpdir } from "node:os"
 
@@ -9,6 +9,9 @@ const PKG_DIR = import.meta.dirname!
 
 const RAVEN_MD = join(PKG_DIR, "Raven.md")
 const MCP_GUIDANCE_MD = join(PKG_DIR, "mcp-guidance.md")
+const PACKAGE_JSON = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8"))
+const PACKAGE_NAME = PACKAGE_JSON.name || "opencode-raven"
+const PACKAGE_VERSION = PACKAGE_JSON.version || "0.0.0"
 
 // ── Search tools that should be intercepted for non-Raven agents ──
 const SEARCH_TOOLS = [
@@ -171,19 +174,30 @@ export default ((input: PluginInput) => {
   // Config file lives in the global opencode config directory
   const configFile = join(homedir(), ".config", "opencode", "raven-config.json")
 
+  function normalizeConfig(raw: any): RavenConfig {
+    const source = raw && typeof raw === "object" ? raw : {}
+    const normalized: RavenConfig = { ...DEFAULT_CONFIG, ...source }
+
+    normalized.enabled = source.enabled !== false
+    normalized.model = typeof source.model === "string" ? source.model : DEFAULT_CONFIG.model
+    normalized.reasoning_effort = typeof source.reasoning_effort === "string" ? source.reasoning_effort : DEFAULT_CONFIG.reasoning_effort
+    normalized.excludeAgents = Array.isArray(source.excludeAgents) ? source.excludeAgents : []
+    normalized.excludeTools = Array.isArray(source.excludeTools) ? source.excludeTools : []
+    normalized.timeout = typeof source.timeout === "number" ? source.timeout : DEFAULT_CONFIG.timeout
+    normalized.stats = source.stats || undefined
+
+    return normalized
+  }
+
   function loadConfig(): RavenConfig {
     try {
       if (existsSync(configFile)) {
         const raw = JSON.parse(readFileSync(configFile, "utf-8"))
-        return {
-          enabled: raw.enabled !== false,
-          model: raw.model,
-          reasoning_effort: raw.reasoning_effort,
-          excludeAgents: Array.isArray(raw.excludeAgents) ? raw.excludeAgents : [],
-          excludeTools: Array.isArray(raw.excludeTools) ? raw.excludeTools : [],
-          timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
-          stats: raw.stats || undefined,
+        const normalized = normalizeConfig(raw)
+        if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
+          saveConfig(normalized)
         }
+        return normalized
       }
     } catch { /* ignore corruption, use defaults */ }
     // Auto-create config file with defaults on first run
@@ -234,6 +248,65 @@ export default ((input: PluginInput) => {
     return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : `${tokens}`
   }
 
+  function compareVersions(a: string, b: string): number {
+    const parse = (v: string) => v.replace(/^v/, "").split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
+    const left = parse(a)
+    const right = parse(b)
+    const len = Math.max(left.length, right.length)
+    for (let i = 0; i < len; i++) {
+      const diff = (left[i] ?? 0) - (right[i] ?? 0)
+      if (diff !== 0) return diff
+    }
+    return 0
+  }
+
+  async function fetchLatestVersion(): Promise<string | undefined> {
+    const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
+      headers: { accept: "application/json" },
+    })
+    if (!res.ok) return undefined
+    const data = await res.json() as { version?: string }
+    return data.version
+  }
+
+  async function checkForUpdate(): Promise<{ current: string; latest?: string; available: boolean }> {
+    const latest = await fetchLatestVersion()
+    return { current: PACKAGE_VERSION, latest, available: !!latest && compareVersions(latest, PACKAGE_VERSION) > 0 }
+  }
+
+  function clearPluginCache(): string[] {
+    const packagesDir = join(homedir(), ".cache", "opencode", "packages")
+    if (!existsSync(packagesDir)) return []
+
+    const removed: string[] = []
+    for (const entry of readdirSync(packagesDir)) {
+      if (entry !== PACKAGE_NAME && !entry.startsWith(`${PACKAGE_NAME}@`)) continue
+      const target = join(packagesDir, entry)
+      rmSync(target, { recursive: true, force: true })
+      removed.push(target)
+    }
+    return removed
+  }
+
+  function manualUpdateText(latest = "latest"): string {
+    return `Restart opencode to load the update.\n\nManual alternatives:\n  bun add ${PACKAGE_NAME}@${latest}\n  npm install ${PACKAGE_NAME}@${latest}\n\nIf opencode still loads the old version, clear its plugin cache and restart:\n  PowerShell: Remove-Item -Recurse -Force "$HOME\\.cache\\opencode\\packages\\${PACKAGE_NAME}*"\n  macOS/Linux: rm -rf ~/.cache/opencode/packages/${PACKAGE_NAME}*`
+  }
+
+  async function notifyIfUpdateAvailable() {
+    try {
+      const info = await checkForUpdate()
+      if (!info.available || !info.latest) return
+      await (client as any).tui?.showToast?.({
+        body: {
+          title: "Raven update available",
+          message: `${PACKAGE_NAME} ${info.current} → ${info.latest}. Run /raven update, then restart opencode.`,
+          variant: "info",
+          duration: 10000,
+        },
+      })
+    } catch { /* update checks are best-effort */ }
+  }
+
   return {
     config(configInput: any) {
       // MCP servers
@@ -273,10 +346,12 @@ export default ((input: PluginInput) => {
       configInput.command = configInput.command || {}
       if (!configInput.command.raven) {
         configInput.command.raven = {
-          template: "Manage Raven: /raven on|off|model <name>|status",
+          template: "Manage Raven: /raven on|off|update|model <name>|status",
           description: "Toggle search interception or change Raven's model",
         }
       }
+
+      void notifyIfUpdateAvailable()
     },
 
     // Register raven_seek tool — lets agents with task:false still search through Raven
@@ -368,7 +443,7 @@ export default ((input: PluginInput) => {
     },
 
     // /raven on|off|model <name>|effort <value>|timeout <seconds>|stats|status
-    "command.execute.before"(input: any, output: any) {
+    async "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
       output.parts.length = 0
       const raw = input.arguments.trim()
@@ -384,6 +459,20 @@ export default ((input: PluginInput) => {
         output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: `Raven context processed:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} tokens)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
+      } else if (arg === "update") {
+        try {
+          const info = await checkForUpdate()
+          if (!info.latest) {
+            output.parts.push({ type: "text", text: `Could not check npm for ${PACKAGE_NAME}. Try again later.\n\n${manualUpdateText()}` })
+          } else if (!info.available) {
+            output.parts.push({ type: "text", text: `Raven is up to date (${info.current}). Latest on npm: ${info.latest}.` })
+          } else {
+            const removed = clearPluginCache()
+            output.parts.push({ type: "text", text: `Raven update available: ${info.current} → ${info.latest}.\n\nCleared ${removed.length} opencode plugin cache entr${removed.length === 1 ? "y" : "ies"}. ${manualUpdateText(info.latest)}` })
+          }
+        } catch (err: any) {
+          output.parts.push({ type: "text", text: `Raven update check failed: ${err?.message ?? err}\n\n${manualUpdateText()}` })
+        }
       } else if (arg.startsWith("model ")) {
         const model = raw.slice(6).trim()
         if (!model) {
@@ -416,7 +505,7 @@ export default ((input: PluginInput) => {
         const model = config.model || fm.model || "(default)"
         const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
         const timeout = config.timeout ?? 180
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
       }
     },
 

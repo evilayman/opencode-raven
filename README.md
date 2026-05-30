@@ -43,12 +43,43 @@ Restart opencode.
 | `/raven` | Show status — enabled/disabled, model, reasoning effort, timeout |
 | `/raven on` | Enable search tool redirection (default) |
 | `/raven off` | Disable interception — all agents can use search tools directly |
+| `/raven update` | Check npm for a newer Raven, clear opencode's plugin cache if needed, then restart opencode |
 | `/raven model <name>` | Change Raven's model (requires restart) |
 | `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
 | `/raven timeout <seconds>` | Change raven_seek timeout (min 10s, takes effect immediately) |
 | `/raven stats` | Show context processed (session + all-time, bytes + tokens) |
 
 Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
+
+## Updates
+
+opencode caches npm plugins, so `"opencode-raven"` / `"opencode-raven@latest"` may not automatically refresh after a new npm release.
+
+Raven checks npm at startup. If an update is available, it shows a TUI notification. To update:
+
+```txt
+/raven update
+```
+
+This checks npm, clears Raven's opencode plugin cache when a newer version exists, and tells you to restart opencode.
+
+Manual alternatives:
+
+```bash
+bun add opencode-raven@latest
+# or
+npm install opencode-raven@latest
+```
+
+If opencode still loads the old cached plugin, clear the opencode plugin cache and restart:
+
+```powershell
+Remove-Item -Recurse -Force "$HOME\.cache\opencode\packages\opencode-raven*"
+```
+
+```bash
+rm -rf ~/.cache/opencode/packages/opencode-raven*
+```
 
 ## Direct access
 
@@ -68,7 +99,7 @@ The agent doesn't see Raven's internal tool calls — just the final findings. R
 
 ### raven-config.json
 
-Located at `~/.config/opencode/raven-config.json`. Auto-created on first run. Edit manually or use `/raven` commands:
+Located at `~/.config/opencode/raven-config.json`. Auto-created on first run and auto-migrated on startup when new default fields are added. Edit manually or use `/raven` commands:
 
 ```json
 {
