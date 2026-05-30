@@ -205,9 +205,11 @@ export default ((input: PluginInput) => {
   const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
 
   // ── Context processed by raven_seek ──
+  let sessionBytes = 0
   let totalBytes = config.stats?.bytes ?? 0
 
   function addBytes(bytes: number) {
+    sessionBytes += bytes
     totalBytes += bytes
     config.stats = { bytes: totalBytes }
     saveConfig(config)
@@ -354,7 +356,7 @@ export default ((input: PluginInput) => {
         saveConfig(config)
         output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
       } else if (arg === "stats") {
-        output.parts.push({ type: "text", text: `Raven context processed: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
+        output.parts.push({ type: "text", text: `Raven context processed:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} tokens)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
       } else if (arg.startsWith("model ")) {
         const model = raw.slice(6).trim()
         if (!model) {
