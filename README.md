@@ -40,7 +40,7 @@ Restart opencode.
 
 | Command | Action |
 |---------|--------|
-| `/raven` | Show status — enabled/disabled, model, reasoning effort, timeout |
+| `/raven` | Show status — enabled/disabled, version, update availability, model, reasoning effort, timeout (no args) |
 | `/raven on` | Enable search tool redirection (default) |
 | `/raven off` | Disable interception — all agents can use search tools directly |
 | `/raven update` | Check npm for a newer Raven, clear opencode's plugin cache if needed, then restart opencode |
@@ -55,7 +55,7 @@ Config persists across restarts in `~/.config/opencode/raven-config.json` (globa
 
 opencode caches npm plugins, so `"opencode-raven"` / `"opencode-raven@latest"` may not automatically refresh after a new npm release.
 
-Raven checks npm at startup. If an update is available, it shows a TUI notification. To update:
+Raven checks npm after the TUI starts. If an update is available, it shows a notification. `/raven` also shows the current version and update availability. To update:
 
 ```txt
 /raven update
@@ -168,6 +168,7 @@ To disable an MCP entirely:
 | `config` | Registers Raven agent, merges Context7/Exa/Grep.app MCP defaults, loads MCP guidance |
 | `tool` | Registers `raven_seek` — creates Raven sessions with timeout, error recovery, timing, and session tree visibility. Tracks context processed for stats (both `raven_seek` and direct `@Raven`). |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
+| `event` | Shows startup update notifications after the TUI event stream is ready |
 | `command.execute.before` | Handles `/raven on\|off\|update\|model\|effort\|timeout\|stats\|status` |
 | `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents (respects `excludeTools`). Error output gives the next `raven_seek(query="...")` call. Injects concise `<raven_guidance>` into subagent prompts. |
 | `tool.execute.after` | Counts output bytes from direct `@Raven` calls for accurate stats. |

@@ -263,6 +263,9 @@ export default ((input: PluginInput) => {
   const ravenSessions = new Set<string>()
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
+  let updateInfo: { current: string; latest?: string; available: boolean } | undefined
+  let updateCheckPromise: Promise<{ current: string; latest?: string; available: boolean }> | undefined
+  let updateToastPending = false
 
   // ── Check if an agent is excluded from Raven enforcement (case-insensitive) ──
   function isExcluded(agent: string | undefined): boolean {
@@ -320,17 +323,54 @@ export default ((input: PluginInput) => {
   }
 
   async function fetchLatestVersion(): Promise<string | undefined> {
-    const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
-      headers: { accept: "application/json" },
-    })
-    if (!res.ok) return undefined
-    const data = await res.json() as { version?: string }
-    return data.version
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 5000)
+    try {
+      const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
+        headers: { accept: "application/json" },
+        signal: controller.signal,
+      })
+      if (!res.ok) return undefined
+      const data = await res.json() as { version?: string }
+      return data.version
+    } finally {
+      clearTimeout(timeout)
+    }
   }
 
   async function checkForUpdate(): Promise<{ current: string; latest?: string; available: boolean }> {
     const latest = await fetchLatestVersion()
     return { current: PACKAGE_VERSION, latest, available: !!latest && compareVersions(latest, PACKAGE_VERSION) > 0 }
+  }
+
+  async function getUpdateInfo(): Promise<{ current: string; latest?: string; available: boolean }> {
+    if (updateInfo) return updateInfo
+    if (!updateCheckPromise) {
+      updateCheckPromise = checkForUpdate()
+        .then((info) => {
+          updateInfo = info
+          return info
+        })
+        .catch((err) => {
+          updateCheckPromise = undefined
+          throw err
+        })
+    }
+    return updateCheckPromise
+  }
+
+  async function refreshUpdateInfo(): Promise<{ current: string; latest?: string; available: boolean }> {
+    updateInfo = undefined
+    updateCheckPromise = checkForUpdate()
+      .then((info) => {
+        updateInfo = info
+        return info
+      })
+      .catch((err) => {
+        updateCheckPromise = undefined
+        throw err
+      })
+    return updateCheckPromise
   }
 
   function clearPluginCache(): string[] {
@@ -353,7 +393,7 @@ export default ((input: PluginInput) => {
 
   async function notifyIfUpdateAvailable() {
     try {
-      const info = await checkForUpdate()
+      const info = await getUpdateInfo()
       if (!info.available || !info.latest) return
       await (client as any).tui?.showToast?.({
         body: {
@@ -417,7 +457,7 @@ export default ((input: PluginInput) => {
         }
       }
 
-      void notifyIfUpdateAvailable()
+      updateToastPending = true
     },
 
     // Register raven_seek tool — lets agents with task:false still search through Raven
@@ -510,6 +550,12 @@ export default ((input: PluginInput) => {
       }
     },
 
+    event() {
+      if (!updateToastPending) return
+      updateToastPending = false
+      setTimeout(() => void notifyIfUpdateAvailable(), 500)
+    },
+
     // /raven on|off|model <name>|effort <value>|timeout <seconds>|stats|status
     async "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
@@ -529,7 +575,7 @@ export default ((input: PluginInput) => {
         output.parts.push({ type: "text", text: `Raven context processed:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} tokens)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
       } else if (arg === "update") {
         try {
-          const info = await checkForUpdate()
+          const info = await refreshUpdateInfo()
           if (!info.latest) {
             output.parts.push({ type: "text", text: `Could not check npm for ${PACKAGE_NAME}. Try again later.\n\n${manualUpdateText()}` })
           } else if (!info.available) {
@@ -573,7 +619,14 @@ export default ((input: PluginInput) => {
         const model = config.model || fm.model || "(default)"
         const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
         const timeout = config.timeout ?? 180
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
+        let update = "Update: unable to check npm."
+        try {
+          const info = await getUpdateInfo()
+          update = info.available && info.latest
+            ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
+            : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
+        } catch { /* keep fallback */ }
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
       }
     },
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.7
+
+### Changed
+- **More reliable update notifications** — startup update toasts are now shown from the event hook after the TUI event stream is active instead of during config loading.
+- **`/raven` default output** — now shows the loaded Raven package version and npm update availability.
+
 ## 1.2.6
 
 ### Fixed
