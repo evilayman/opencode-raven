@@ -162,6 +162,12 @@ export default ((input: PluginInput) => {
   let config = loadConfig()
   const ravenSessions = new Set<string>()
 
+  // Throttle: show the full error message once per session, then silent
+  const throttledSessions = new Set<string>()
+  const REROUTE_MSG =
+    "Search tools are blocked. Delegate to Raven: task(subagent_type=\"raven\", prompt=\"...\"). " +
+    "If task is unavailable, use raven_seek(query=\"...\")."
+
   return {
     config(configInput: any) {
       // MCP servers
@@ -294,31 +300,32 @@ export default ((input: PluginInput) => {
       if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
 
+      // ── Subagent prompt injection: inject Raven guidance into every subagent ──
+      if ((input.tool === "task" || input.tool === "subtask") && output.args) {
+        const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
+        if (subagentType !== "raven") {
+          const field = ["prompt", "description", "request", "objective", "query"].find(
+            (f) => f in output.args
+          ) ?? "prompt"
+          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, Context7, Exa, Grep.app, bash search) are blocked. Delegate search to Raven: task(subagent_type="raven", prompt="..."). If task is unavailable, use raven_seek(query="...").\n</raven_guidance>`
+        }
+      }
+
+      // ── Block search tools for non-Raven agents ──
       const isSearchTool = SEARCH_TOOLS.includes(input.tool)
       const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
 
-      if (!isSearchTool && !isSearchBashCmd) return
-
-      throw new Error(
-        "Search tool disabled — delegate to Raven via the task tool (subagent_type=\"raven\")"
-      )
+      if (isSearchTool || isSearchBashCmd) {
+        if (throttledSessions.has(input.sessionID)) {
+          throw new Error("")
+        }
+        throttledSessions.add(input.sessionID)
+        throw new Error(REROUTE_MSG)
+      }
     },
 
     "tool.execute.after"(input: any, output: any) {
-      if (!config.enabled) return
-      if (ravenSessions.has(input.sessionID)) return
-
-      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
-      const isSearchBashCmd = isSearchBash(input.tool, input.args || output.args)
-
-      if (!isSearchTool && !isSearchBashCmd) return
-
-      const msg = "Search tool disabled — delegate to Raven via the task tool (subagent_type=\"raven\")"
-      output.output = msg
-      try {
-        const raw = output as any
-        if (raw.content?.[0]?.text) raw.content[0].text = msg
-      } catch {}
+      // Reserved for future analytics / redirect tracking (#5)
     },
   }
 }) satisfies Plugin
