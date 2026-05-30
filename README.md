@@ -51,7 +51,7 @@ Config persists across restarts in `~/.config/opencode/raven-config.json` (globa
 
 ## raven_seek
 
-When search tools are blocked, agents use **`raven_seek`** — a tool that creates a hidden Raven session, runs the search, and returns compact results:
+When search tools are blocked, agents use **`raven_seek`** — a unified tool that handles ALL search types (local codebase, web, docs, GitHub examples):
 
 ```
 raven_seek(query: "how to use useEffect cleanup")
@@ -150,6 +150,7 @@ To disable an MCP entirely:
 |---------|----------|
 | Content search | `rg`, `grep`, `egrep`, `fgrep`, `git grep`, `ack`, `ag`, `findstr`, `Select-String` |
 | Filesystem exploration | `Get-ChildItem`, `gci`, `find -name`, `find -type`, `ls -R`, `dir /s` |
+| Shell bypass | `cmd /c dir`, `cmd /c findstr`, `cmd /c find`, `cmd /c where`, `cmd /c tree` |
 
 **Unrestricted**: `read`, `task`, `subtask`, `raven_seek`, and non-search `bash` commands.
 

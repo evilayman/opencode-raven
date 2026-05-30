@@ -40,7 +40,7 @@ const SEARCH_TOOLS = [
 ]
 
 // ── Bash commands that look like search workarounds ──
-const SEARCH_BASH_RE = /\b(rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String|Get-ChildItem|gci\b|dir\b\s+[/-][sS]|ls\b\s+-[rR]|find\b\s+.*-name|find\b\s+.*-type)\b/
+const SEARCH_BASH_RE = /\b(rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String|Get-ChildItem|gci\b|dir\b\s+[/-][sS]|ls\b\s+-[rR]|find\b\s+.*-name|find\b\s+.*-type)\b/i
 
 // Strip quoted content to avoid false positives (e.g. echo "use grep here")
 function stripHeredocs(cmd: string): string {
@@ -57,7 +57,8 @@ function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
   const cmd = stripQuotedContent(String(args?.command ?? ""))
   const desc = stripQuotedContent(String(args?.description ?? ""))
-  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc)
+  const lower = cmd.toLowerCase().trim()
+  return SEARCH_BASH_RE.test(cmd) || SEARCH_BASH_RE.test(desc) || /^cmd\s+\/c\s+(dir|findstr|find|where|tree)\b/.test(lower)
 }
 
 // ── Config file shape ──
@@ -202,7 +203,7 @@ export default ((input: PluginInput) => {
     return config.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
-  const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
+  const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") for all searches — local codebase, web, docs, and GitHub examples."
 
   // ── Context processed by raven_seek ──
   let sessionBytes = 0
@@ -274,7 +275,7 @@ export default ((input: PluginInput) => {
     // Register raven_seek tool — lets agents with task:false still search through Raven
     tool: {
       "raven_seek": tool({
-        description: "Fallback search tool — use only when task delegation to Raven (subagent_type=\"raven\") is unavailable. Raven has access to Context7, Exa AI, and Grep.app for web search, docs lookup, and GitHub examples.",
+        description: "Unified search tool — use only when task delegation to Raven (subagent_type=\"raven\") is unavailable. Handles ALL searches: local codebase, web, docs, and GitHub examples via Context7, Exa AI, and Grep.app.",
         args: {
           query: tool.schema.string().describe("What to search for — be specific about what you need (docs, code examples, web info, etc.)"),
         },
@@ -396,7 +397,7 @@ export default ((input: PluginInput) => {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
           ) ?? "prompt"
-          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, Context7, Exa, Grep.app, bash search) are blocked. Use raven_seek(query="...") to search through Raven.\n</raven_guidance>`
+          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, ls, dir, bash search commands) are blocked. Use raven_seek(query=\"...\") for ALL searches — local codebase, web, docs, and GitHub examples.\n</raven_guidance>`
         }
       }
 

@@ -6,4 +6,4 @@
 
 ## Built-in search tools (grep, glob, search-like bash) are blocked and routed to Raven automatically.
 
-Use raven_seek(query="...") to search through Raven.
+Use raven_seek(query="...") for ALL searches — local codebase, web, docs, and GitHub examples.
