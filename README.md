@@ -45,6 +45,7 @@ Restart opencode.
 | `/raven off` | Disable interception — all agents can use search tools directly |
 | `/raven model <name>` | Change Raven's model (requires restart) |
 | `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
+| `/raven stats` | Show blocked calls, context saved (session + global) |
 
 Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
@@ -69,7 +70,8 @@ Located at `~/.config/opencode/raven-config.json`. Auto-created on first run. Ed
   "enabled": true,
   "model": "opencode/deepseek-v4-flash-free",
   "reasoning_effort": "low",
-  "excludeAgents": []
+  "excludeAgents": [],
+  "excludeTools": []
 }
 ```
 
@@ -79,6 +81,8 @@ Located at `~/.config/opencode/raven-config.json`. Auto-created on first run. Ed
 | `model` | *(from Raven.md)* | Override Raven's model without editing package files |
 | `reasoning_effort` | *(from Raven.md)* | Override Raven's reasoning effort (e.g. `"low"`, `"medium"`, `"high"`) |
 | `excludeAgents` | `[]` | Agents that bypass search tool blocking (case-insensitive). e.g. `["librarian", "explorer"]` |
+| `excludeTools` | `[]` | Tools that never get blocked. e.g. `["glob", "webfetch"]` |
+| `stats` | *(auto)* | Global blocked call count and context saved. Managed automatically. |
 
 ### MCP servers
 
@@ -123,7 +127,7 @@ To disable an MCP entirely:
 | `tool` | Registers `raven_seek` — hidden Raven sessions with error recovery for API failures |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
 | `command.execute.before` | Handles `/raven on\|off\|model\|effort\|status` |
-| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Throttled: full message once per session, silent after. |
+| `tool.execute.before` | Blocks search tools for non-Raven, non-excluded agents. Injects `<raven_guidance>` into subagent prompts. Throttled: full message once per session, silent after. Tracks blocked calls + context saved. |
 
 ### Blocked tools (redirected except for Raven and any agents in `excludeAgents`)
 

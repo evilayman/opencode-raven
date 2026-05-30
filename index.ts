@@ -65,6 +65,8 @@ interface RavenConfig {
   model?: string
   reasoning_effort?: string
   excludeAgents?: string[]
+  excludeTools?: string[]
+  stats?: { blocked: number; bytesSaved: number; tools: Record<string, number> }
 }
 
 // ── Parse Raven.md frontmatter ──
@@ -76,6 +78,7 @@ const DEFAULT_CONFIG: RavenConfig = {
   model: fm.model,
   reasoning_effort: fm.reasoning_effort,
   excludeAgents: [],
+  excludeTools: [],
 }
 
 function parseRavenMd(raw: string): { frontmatter: Record<string, any>; prompt: string } {
@@ -170,6 +173,8 @@ export default ((input: PluginInput) => {
           model: raw.model,
           reasoning_effort: raw.reasoning_effort,
           excludeAgents: Array.isArray(raw.excludeAgents) ? raw.excludeAgents : [],
+          excludeTools: Array.isArray(raw.excludeTools) ? raw.excludeTools : [],
+          stats: raw.stats || undefined,
         }
       }
     } catch { /* ignore corruption, use defaults */ }
@@ -199,6 +204,65 @@ export default ((input: PluginInput) => {
   // Throttle: show the full error message once per session, then silent
   const throttledSessions = new Set<string>()
   const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
+
+  // ── Session stats: track blocked calls + estimated context saved ──
+  const sessionStats = new Map<string, { blocked: number; tools: Map<string, number>; bytesSaved: number }>()
+  const globalStats = { blocked: 0, tools: new Map<string, number>(), bytesSaved: 0 }
+  // Restore global stats from config
+  if (config.stats) {
+    globalStats.blocked = config.stats.blocked ?? 0
+    globalStats.bytesSaved = config.stats.bytesSaved ?? 0
+    for (const [t, n] of Object.entries(config.stats.tools ?? {})) {
+      globalStats.tools.set(t, n)
+    }
+  }
+
+  function getBytesEstimate(tool: string): number {
+    const ESTIMATES: Record<string, number> = {
+      grep: 2000, glob: 2000,
+      webfetch: 16000, fetch: 16000,
+      websearch_web_search_exa: 8000,
+      context7_resolve_library_id: 1000, context7_query_docs: 4000,
+      exa_web_search_exa: 8000, exa_web_fetch_exa: 16000,
+      exa_web_search_advanced_exa: 8000, exa_company_research_exa: 8000,
+      exa_crawling_exa: 12000, exa_people_search_exa: 6000,
+      exa_linkedin_search_exa: 6000, exa_get_code_context_exa: 4000,
+      exa_deep_researcher_start: 8000, exa_deep_researcher_check: 2000,
+      exa_deep_search_exa: 8000,
+      grep_app_searchGitHub: 4000,
+    }
+    return ESTIMATES[tool] ?? 2000 // default for bash search / unknown
+  }
+
+  function trackBlock(sessionID: string, tool: string) {
+    // Session stats
+    let stats = sessionStats.get(sessionID)
+    if (!stats) {
+      stats = { blocked: 0, tools: new Map(), bytesSaved: 0 }
+      sessionStats.set(sessionID, stats)
+    }
+    stats.blocked++
+    stats.tools.set(tool, (stats.tools.get(tool) ?? 0) + 1)
+    stats.bytesSaved += getBytesEstimate(tool)
+    // Global stats
+    globalStats.blocked++
+    globalStats.tools.set(tool, (globalStats.tools.get(tool) ?? 0) + 1)
+    globalStats.bytesSaved += getBytesEstimate(tool)
+    // Persist to config
+    config.stats = { blocked: globalStats.blocked, bytesSaved: globalStats.bytesSaved, tools: Object.fromEntries(globalStats.tools) }
+    saveConfig(config)
+  }
+
+  function formatBytes(bytes: number): string {
+    return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)}MB`
+      : bytes >= 1000 ? `${(bytes / 1000).toFixed(1)}KB`
+      : `${bytes}B`
+  }
+
+  function formatTokens(bytes: number): string {
+    const tokens = Math.round(bytes / 4)
+    return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : `${tokens}`
+  }
 
   return {
     config(configInput: any) {
@@ -326,6 +390,15 @@ export default ((input: PluginInput) => {
         config.enabled = false
         saveConfig(config)
         output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
+      } else if (arg === "stats") {
+        const session = sessionStats.get(input.sessionID)
+        const sessionStr = !session || session.blocked === 0
+          ? "  No blocks this session."
+          : `  Session: ${session.blocked} blocked, ~${formatBytes(session.bytesSaved)} (~${formatTokens(session.bytesSaved)} tokens)`
+        const globalStr = globalStats.blocked === 0
+          ? "  Global: no blocks yet."
+          : `  Global: ${globalStats.blocked} blocked, ~${formatBytes(globalStats.bytesSaved)} (~${formatTokens(globalStats.bytesSaved)} tokens)`
+        output.parts.push({ type: "text", text: `Raven stats:\n${sessionStr}\n${globalStr}` })
       } else if (arg.startsWith("model ")) {
         const model = raw.slice(6).trim()
         if (!model) {
@@ -348,7 +421,7 @@ export default ((input: PluginInput) => {
         const enabled = config.enabled ? "enabled" : "disabled"
         const model = config.model || fm.model || "(default)"
         const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Model: ${model}. Reasoning: ${effort}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven stats   — show blocked calls and context saved` })
       }
     },
 
@@ -356,6 +429,7 @@ export default ((input: PluginInput) => {
       if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
       if (isExcluded(sessionAgents.get(input.sessionID))) return
+      if (config.excludeTools?.includes(input.tool)) return
 
       // ── Subagent prompt injection: inject Raven guidance into every subagent ──
       if ((input.tool === "task" || input.tool === "subtask") && output.args) {
@@ -373,6 +447,7 @@ export default ((input: PluginInput) => {
       const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
 
       if (isSearchTool || isSearchBashCmd) {
+        trackBlock(input.sessionID, isSearchBashCmd ? "bash(search)" : input.tool)
         if (throttledSessions.has(input.sessionID)) {
           throw new Error("")
         }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+### Added
+- **`/raven stats`** — per-session and global tracking of blocked calls, bytes saved, and token estimates. Global stats persist across restarts.
+- **`excludeTools`** — per-tool allowlist in config. Tools listed in `excludeTools` never get blocked, even for non-excluded agents.
+
 ## 1.2.0
 
 ### Added
