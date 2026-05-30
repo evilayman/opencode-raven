@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.6
+
+### Fixed
+- **Piped bash output filters** — commands like `command | grep ...`, `command | rg ...`, `command | findstr ...`, and `command | head ...` are now allowed as bounded output filters instead of being rerouted to Raven.
+
+### Changed
+- **Bash search detection** — Raven still blocks primary discovery commands like `rg "foo" .`, `grep -R`, `find . -name`, `dir /s`, and `Get-ChildItem -Recurse`, but no longer treats simple pipeline filtering as a Raven-worthy search.
+
 ## 1.2.5
 
 ### Added
