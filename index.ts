@@ -250,7 +250,15 @@ export default ((input: PluginInput) => {
 
             return { title: "Raven Seek", output }
           } catch (err: any) {
-            return { title: "Raven Seek", output: `Raven search failed: ${err.message || err}` }
+            const msg = String(err?.message ?? err ?? "").toLowerCase()
+            const hint =
+              /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
+              : /quota|usage.?limit|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota exhausted — proceed without search, tell user what's missing."
+              : /token|context.?length|too large|too long/i.test(msg) ? "Raven query too large — shorten your query and retry."
+              : /model|unavailable|down|not found/i.test(msg) ? "Raven model unavailable — retry later, or proceed without search."
+              : /timeout|timed.?out|econnrefused/i.test(msg) ? "Raven timed out — retry with a narrower query."
+              : `Raven search failed. Proceed without search — note gaps for the user. [${err.message || err}]`
+            return { title: "Raven Seek", output: hint }
           }
         },
       }),
