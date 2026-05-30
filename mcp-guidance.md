@@ -6,5 +6,4 @@
 
 ## Built-in search tools (grep, glob, search-like bash) are blocked and routed to Raven automatically.
 
-Use task(subagent_type="raven") to delegate search to Raven.
-If task delegation is unavailable, use the raven_seek tool as a fallback.
+Use raven_seek(query="...") to search through Raven.

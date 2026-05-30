@@ -164,9 +164,7 @@ export default ((input: PluginInput) => {
 
   // Throttle: show the full error message once per session, then silent
   const throttledSessions = new Set<string>()
-  const REROUTE_MSG =
-    "Search tools are blocked. Delegate to Raven: task(subagent_type=\"raven\", prompt=\"...\"). " +
-    "If task is unavailable, use raven_seek(query=\"...\")."
+  const REROUTE_MSG = "Search tools are blocked. Use raven_seek(query=\"...\") to search through Raven."
 
   return {
     config(configInput: any) {
@@ -307,7 +305,7 @@ export default ((input: PluginInput) => {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
           ) ?? "prompt"
-          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, Context7, Exa, Grep.app, bash search) are blocked. Delegate search to Raven: task(subagent_type="raven", prompt="..."). If task is unavailable, use raven_seek(query="...").\n</raven_guidance>`
+          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\nSearch tools (grep, glob, Context7, Exa, Grep.app, bash search) are blocked. Use raven_seek(query="...") to search through Raven.\n</raven_guidance>`
         }
       }
 
