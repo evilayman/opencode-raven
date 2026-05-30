@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.2
+
+### Added
+- **`excludeTools`** — per-tool allowlist in config. Tools listed never get blocked.
+- **`websearch`** — built-in web search tool now intercepted.
+- **Session + global stats** — session counter (resets on restart) and all-time counter (persists).
+
+### Changed
+- **Stats refactored** — tracks `raven_seek` context processed (actual output size) instead of blocked tool counts and estimates. Cleaner, more meaningful.
+- **No more error throttling** — full `REROUTE_MSG` on every blocked tool call.
+- **Bytes from real measurements only** — dropped static estimates, numbers reflect actual Raven output.
+
 ## 1.2.1
 
 ### Added
