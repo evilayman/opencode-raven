@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.0
+
+### Added
+- **Configurable tool/MCP routing** — Raven can now route arbitrary tools or MCP server prefixes through `raven_seek` using `routeTools`, `routeMcpServers`, or `/raven route ...` commands.
+- **Bundled MCP toggle** — `raven-config.json` now includes `allowBundledMCPServers` to enable or disable Raven's bundled Context7, Exa, and Grep.app MCP defaults while preserving any existing `opencode.jsonc` MCP settings.
+- **Custom Raven instructions** — `ravenInstructions` lets users append extra Raven-only prompt guidance for custom MCPs without editing package files.
+
+### Changed
+- **Hard rerouting, not soft guidance** — Raven is now documented and configured as a hard tool/MCP blocker-rerouter. Configured tools are blocked for non-Raven agents and must go through `raven_seek`.
+- **Generalized beyond search** — Raven still defaults to search/fetch/docs/GitHub routing, but can route any MCP whose opencode tool names share a prefix.
+- **Config migration** — default routed tools/MCP server prefixes are added to `raven-config.json` only when those fields are missing, so user removals stay removed.
+- **Bash routing visibility** — search-like bash command routing is now controlled by `bash` in `routeTools`. Remove `bash` to allow commands like `rg`, `Get-ChildItem -Recurse`, and `dir /s` directly.
+- **Default routing cleanup** — removed `websearch` from default routed tools/MCP prefixes. Users who need it can add it manually with `/raven route tool add websearch` or `/raven route mcp add websearch`.
+- **Compact reroute errors** — blocked MCP/tool calls now strip null and empty args before showing the `raven_seek` retry hint, reducing failed-call context noise.
+
 ## 1.2.8
 
 ### Fixed

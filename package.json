@@ -1,7 +1,7 @@
 {
   "name": "opencode-raven",
-  "version": "1.2.8",
-  "description": "Search-first subagent for opencode — intercepts search tools and routes them through a hidden Raven agent with Context7, Exa AI, and Grep.app MCPs",
+  "version": "2.0.0",
+  "description": "Hard tool/MCP rerouter for opencode — blocks configured tools and routes them through a Raven agent to reduce context flooding",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts"
@@ -18,6 +18,8 @@
     "opencode",
     "opencode-plugin",
     "search",
+    "router",
+    "reroute",
     "subagent",
     "mcp",
     "context7",

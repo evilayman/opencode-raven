@@ -13,34 +13,28 @@ const PACKAGE_JSON = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf
 const PACKAGE_NAME = PACKAGE_JSON.name || "opencode-raven"
 const PACKAGE_VERSION = PACKAGE_JSON.version || "0.0.0"
 
-// ── Search tools that should be intercepted for non-Raven agents ──
-const SEARCH_TOOLS = [
-  // Built-in tools
+// ── Tools/MCPs that should be intercepted for non-Raven agents ──
+const DEFAULT_ROUTE_TOOLS = [
   "grep",
   "glob",
   "webfetch",
   "fetch",
-  "websearch",
-  // WebSearch MCP
-  "websearch_web_search_exa",
-  // Context7 MCP
-  "context7_resolve-library-id",
-  "context7_query-docs",
-  // Exa AI MCP
-  "exa_web_search_exa",
-  "exa_web_fetch_exa",
-  "exa_web_search_advanced_exa",
-  "exa_company_research_exa",
-  "exa_crawling_exa",
-  "exa_people_search_exa",
-  "exa_linkedin_search_exa",
-  "exa_get_code_context_exa",
-  "exa_deep_researcher_start",
-  "exa_deep_researcher_check",
-  "exa_deep_search_exa",
-  // Grep.app MCP
-  "grep_app_searchGitHub",
+  "bash",
 ]
+
+const DEFAULT_ROUTE_MCP_SERVERS = [
+  "context7",
+  "exa",
+  "grep_app",
+]
+
+const DEFAULT_MCP_SERVERS: Record<string, string> = {
+  context7: "https://mcp.context7.com/mcp",
+  exa: "https://mcp.exa.ai/mcp",
+  grep_app: "https://mcp.grep.app",
+}
+
+const NEVER_ROUTE_TOOLS = new Set(["raven_seek", "task", "subtask"])
 
 // ── Bash commands that look like search workarounds ──
 const SEARCH_BASH_RE = /\b(?:rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String)\b|\b(?:Get-ChildItem|gci)\b(?=[^|;&\n]*(?:-Recurse|-Filter|-Include|\s-[A-Za-z]*r[A-Za-z]*\b))|\bdir\b(?=[^|;&\n]*(?:[/-][sS]\b|-Recurse|-Filter|-Include))|\bls\b(?=[^|;&\n]*(?:\s-[A-Za-z]*R[A-Za-z]*\b|--recursive\b))|\bfind\b\s+.*(?:-name|-type)\b/i
@@ -117,6 +111,10 @@ interface RavenConfig {
   enabled: boolean
   model?: string
   reasoning_effort?: string
+  ravenInstructions?: string
+  routeTools?: string[]
+  routeMcpServers?: string[]
+  allowBundledMCPServers?: boolean
   excludeAgents?: string[]
   excludeTools?: string[]
   timeout?: number
@@ -131,6 +129,10 @@ const DEFAULT_CONFIG: RavenConfig = {
   enabled: true,
   model: fm.model,
   reasoning_effort: fm.reasoning_effort,
+  ravenInstructions: "",
+  routeTools: DEFAULT_ROUTE_TOOLS,
+  routeMcpServers: DEFAULT_ROUTE_MCP_SERVERS,
+  allowBundledMCPServers: true,
   excludeAgents: [],
   excludeTools: [],
   timeout: 180,
@@ -214,6 +216,11 @@ function extractOptions(fm: Record<string, any>): Record<string, any> {
   return options
 }
 
+function uniqueStrings(value: unknown, fallback: string[] = []): string[] {
+  const source = Array.isArray(value) ? value : fallback
+  return [...new Set(source.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()))]
+}
+
 // ── Plugin ──
 export default ((input: PluginInput) => {
   const client = input.client
@@ -228,8 +235,12 @@ export default ((input: PluginInput) => {
     normalized.enabled = source.enabled !== false
     normalized.model = typeof source.model === "string" ? source.model : DEFAULT_CONFIG.model
     normalized.reasoning_effort = typeof source.reasoning_effort === "string" ? source.reasoning_effort : DEFAULT_CONFIG.reasoning_effort
-    normalized.excludeAgents = Array.isArray(source.excludeAgents) ? source.excludeAgents : []
-    normalized.excludeTools = Array.isArray(source.excludeTools) ? source.excludeTools : []
+    normalized.ravenInstructions = typeof source.ravenInstructions === "string" ? source.ravenInstructions : DEFAULT_CONFIG.ravenInstructions
+    normalized.routeTools = uniqueStrings(source.routeTools, DEFAULT_ROUTE_TOOLS)
+    normalized.routeMcpServers = uniqueStrings(source.routeMcpServers, DEFAULT_ROUTE_MCP_SERVERS)
+    normalized.allowBundledMCPServers = source.allowBundledMCPServers !== false
+    normalized.excludeAgents = uniqueStrings(source.excludeAgents)
+    normalized.excludeTools = uniqueStrings(source.excludeTools)
     normalized.timeout = typeof source.timeout === "number" ? source.timeout : DEFAULT_CONFIG.timeout
     normalized.stats = source.stats || undefined
 
@@ -276,21 +287,65 @@ export default ((input: PluginInput) => {
     return config.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
-  const RAVEN_GUIDANCE = `Search/fetch tools are blocked by Raven. If one is blocked, your next tool call should be raven_seek(query="<same search/fetch request>").`
+  function ravenGuidance(): string {
+    const tools = config.routeTools?.length ? config.routeTools.join(", ") : "none"
+    const mcps = config.routeMcpServers?.length ? config.routeMcpServers.map((server) => `${server}_*`).join(", ") : "none"
+    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Routed MCP prefixes: ${mcps}. If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
+  }
+
+  function isRouteConfigured(toolName: string): boolean {
+    const tool = toolName.toLowerCase()
+    if (NEVER_ROUTE_TOOLS.has(tool)) return false
+    if (config.routeTools?.some((name) => name.toLowerCase() === tool)) return true
+    return config.routeMcpServers?.some((server) => tool.startsWith(`${server.toLowerCase()}_`)) ?? false
+  }
+
+  function compactArgs(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map(compactArgs).filter((item) => item !== undefined)
+    }
+    if (!value || typeof value !== "object") return value
+    const result: Record<string, any> = {}
+    for (const [key, raw] of Object.entries(value)) {
+      const item = compactArgs(raw)
+      if (item === undefined || item === null || item === "") continue
+      if (Array.isArray(item) && item.length === 0) continue
+      if (typeof item === "object" && !Array.isArray(item) && Object.keys(item).length === 0) continue
+      result[key] = item
+    }
+    return result
+  }
 
   function attemptedQuery(tool: string, args: any): string {
-    if (!args || typeof args !== "object") return `${tool}: ${JSON.stringify(args)}`
-    const direct = args.query ?? args.pattern ?? args.url ?? args.urls ?? args.command ?? args.path ?? args.filePath
-    const value = direct !== undefined ? direct : args
+    const compact = compactArgs(args)
+    if (!compact || typeof compact !== "object") return `${tool}: ${JSON.stringify(compact)}`
+    const direct = compact.query ?? compact.pattern ?? compact.url ?? compact.urls ?? compact.command ?? compact.path ?? compact.filePath
+    const value = direct !== undefined ? direct : compact
     const text = typeof value === "string" ? value : JSON.stringify(value)
-    return text.length > 500 ? `${text.slice(0, 497)}...` : text
+    const query = value === compact ? `${tool} ${text}` : `${tool}: ${text}`
+    return query.length > 300 ? `${query.slice(0, 297)}...` : query
   }
 
   function rerouteMessage(tool: string, args: any): string {
     return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_seek(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
   }
 
-  // ── Context processed by raven_seek ──
+  function routeSummary(): string {
+    const tools = config.routeTools?.length ? config.routeTools.join(", ") : "(none)"
+    const mcps = config.routeMcpServers?.length ? config.routeMcpServers.join(", ") : "(none)"
+    return `Raven routed tools/MCPs:\n  Tools: ${tools}\n  MCP servers: ${mcps}`
+  }
+
+  function mcpSummary(): string {
+    return `Raven bundled MCPs: ${config.allowBundledMCPServers === false ? "disabled" : Object.keys(DEFAULT_MCP_SERVERS).join(", ")}`
+  }
+
+  function ravenAgentPrompt(): string {
+    const extra = config.ravenInstructions?.trim()
+    return extra ? `${ravenPrompt}\n\nAdditional user instructions:\n${extra}` : ravenPrompt
+  }
+
+  // ── Context saved by Raven delegation ──
   let sessionBytes = 0
   let totalBytes = config.stats?.bytes ?? 0
 
@@ -437,11 +492,13 @@ export default ((input: PluginInput) => {
 
   return {
     config(configInput: any) {
-      // MCP servers
-      configInput.mcp = configInput.mcp || {}
-      ensureRemoteMcp(configInput, "context7", "https://mcp.context7.com/mcp")
-      ensureRemoteMcp(configInput, "exa", "https://mcp.exa.ai/mcp")
-      ensureRemoteMcp(configInput, "grep_app", "https://mcp.grep.app")
+      // Bundled MCP defaults. Existing opencode.jsonc entries are merged, not overwritten.
+      if (config.allowBundledMCPServers !== false) {
+        configInput.mcp = configInput.mcp || {}
+        for (const [key, url] of Object.entries(DEFAULT_MCP_SERVERS)) {
+          ensureRemoteMcp(configInput, key, url)
+        }
+      }
 
       // Inject MCP guidance as a startup instruction file (absolute path for npm compat)
       configInput.instructions = configInput.instructions || []
@@ -461,27 +518,27 @@ export default ((input: PluginInput) => {
           ...(config.reasoning_effort ? { reasoning_effort: config.reasoning_effort } : {}),
         },
         permission: fm.permission || {},
-        prompt: ravenPrompt,
+        prompt: ravenAgentPrompt(),
       }
 
       // Register /raven command
       configInput.command = configInput.command || {}
       if (!configInput.command.raven) {
         configInput.command.raven = {
-          template: "Manage Raven: /raven on|off|update|model <name>|status",
-          description: "Toggle search interception or change Raven's model",
+          template: "Manage Raven: /raven on|off|route|update|model <name>|status",
+          description: "Toggle Raven routing, manage routed tools/MCPs, or change Raven's model",
         }
       }
 
       updateToastPending = true
     },
 
-    // Register raven_seek tool — lets agents with task:false still search through Raven
+    // Register raven_seek tool — lets agents with task:false still delegate through Raven
     tool: {
       "raven_seek": tool({
-        description: "Unified Raven search/fetch/inspection tool. Use this whenever grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, or search-like bash would be used. Handles local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
+        description: "Unified Raven delegation tool. Use this whenever a tool/MCP is blocked by Raven, or when grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, or search-like bash would be used. Handles routed MCP requests, local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
         args: {
-          query: tool.schema.string().describe("What Raven should search, fetch, read, or inspect. Include exact URLs when replacing WebFetch. Include commands/output checks when replacing grep/rg/head over command output."),
+          query: tool.schema.string().describe("What Raven should do. Include the original blocked tool/MCP request and relevant args, exact URLs when replacing WebFetch, and commands/output checks when replacing grep/rg/head over command output."),
         },
         async execute(args, context) {
           const started = Date.now()
@@ -591,7 +648,7 @@ export default ((input: PluginInput) => {
       setTimeout(() => void notifyIfUpdateAvailable(), 500)
     },
 
-    // /raven on|off|model <name>|effort <value>|timeout <seconds>|stats|status
+    // /raven on|off|route|model <name>|effort <value>|timeout <seconds>|stats|status
     async "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
       output.parts.length = 0
@@ -601,13 +658,33 @@ export default ((input: PluginInput) => {
       if (arg === "on") {
         config.enabled = true
         saveConfig(config)
-        output.parts.push({ type: "text", text: "Raven search interception enabled. Non-Raven agents will be redirected to @raven for search tools." })
+        output.parts.push({ type: "text", text: "Raven tool/MCP routing enabled. Non-Raven agents will be redirected to raven_seek for configured tools." })
       } else if (arg === "off") {
         config.enabled = false
         saveConfig(config)
-        output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
+        output.parts.push({ type: "text", text: "Raven tool/MCP routing disabled. All agents can use tools directly." })
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: `Raven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)` })
+      } else if (arg === "route") {
+        output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>` })
+      } else if (arg.startsWith("route ")) {
+        const parts = raw.split(/\s+/)
+        const kind = parts[1]?.toLowerCase()
+        const action = parts[2]?.toLowerCase()
+        const name = parts.slice(3).join(" ").trim()
+        const key = kind === "tool" ? "routeTools" : kind === "mcp" || kind === "server" ? "routeMcpServers" : undefined
+
+        if (!key || !["add", "remove", "rm"].includes(action) || !name) {
+          output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>" })
+        } else {
+          const values = uniqueStrings(config[key])
+          const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())
+          config[key] = action === "add"
+            ? exists ? values : [...values, name]
+            : values.filter((value) => value.toLowerCase() !== name.toLowerCase())
+          saveConfig(config)
+          output.parts.push({ type: "text", text: routeSummary() })
+        }
       } else if (arg === "update") {
         try {
           const info = await refreshUpdateInfo()
@@ -661,7 +738,7 @@ export default ((input: PluginInput) => {
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
             : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\nRaven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\nRaven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)\n\nCommands:\n  /raven on      — enable tool/MCP routing\n  /raven off     — disable tool/MCP routing\n  /raven route   — show or edit routed tools/MCP servers\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
       }
     },
 
@@ -673,7 +750,7 @@ export default ((input: PluginInput) => {
       if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
       if (isExcluded(sessionAgents.get(input.sessionID))) return
-      if (config.excludeTools?.includes(input.tool)) return
+      if (config.excludeTools?.some((name) => name.toLowerCase() === input.tool.toLowerCase())) return
 
       // ── Subagent prompt injection: inject Raven guidance into every subagent ──
       if ((input.tool === "task" || input.tool === "subtask") && output.args) {
@@ -689,16 +766,18 @@ export default ((input: PluginInput) => {
           const field = ["prompt", "description", "request", "objective", "query"].find(
             (f) => f in output.args
           ) ?? "prompt"
-          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\n${RAVEN_GUIDANCE}\n</raven_guidance>`
+          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\n${ravenGuidance()}\n</raven_guidance>`
         }
       }
 
-      // ── Block search tools for non-Raven agents ──
-      const isSearchTool = SEARCH_TOOLS.includes(input.tool)
-      const isSearchBashCmd = isSearchBash(input.tool, output.args || input.args)
+      // ── Block routed tools/MCPs for non-Raven agents ──
+      const shouldRouteTool = input.tool === "bash" ? false : isRouteConfigured(input.tool)
+      const isSearchBashCmd = isRouteConfigured("bash") && isSearchBash(input.tool, output.args || input.args)
 
-      if (isSearchTool || isSearchBashCmd) {
-        throw new Error(rerouteMessage(input.tool, output.args || input.args))
+      if (shouldRouteTool || isSearchBashCmd) {
+        const args = compactArgs(output.args || input.args)
+        if (output.args && typeof output.args === "object") output.args = args
+        throw new Error(rerouteMessage(input.tool, args))
       }
     },
 
