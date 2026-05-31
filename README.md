@@ -47,7 +47,7 @@ Restart opencode.
 | `/raven model <name>` | Change Raven's model (requires restart) |
 | `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
 | `/raven timeout <seconds>` | Change raven_seek timeout (min 10s, takes effect immediately) |
-| `/raven stats` | Show context processed (session + all-time, bytes + tokens) |
+| `/raven stats` | Show context saved (session + all-time, bytes + tokens) |
 
 Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
 

@@ -262,7 +262,9 @@ export default ((input: PluginInput) => {
   let config = loadConfig()
   const ravenSessions = new Set<string>()
   const ravenTaskCalls = new Set<string>()
+  const ravenTaskPrompts = new Map<string, number>()
   const sessionAgents = new Map<string, string>()
+  const ravenSessionParents = new Map<string, string>()
   let updateInfo: { current: string; latest?: string; available: boolean } | undefined
   let updateCheckPromise: Promise<{ current: string; latest?: string; available: boolean }> | undefined
   let updateToastPending = false
@@ -341,6 +343,20 @@ export default ((input: PluginInput) => {
   async function checkForUpdate(): Promise<{ current: string; latest?: string; available: boolean }> {
     const latest = await fetchLatestVersion()
     return { current: PACKAGE_VERSION, latest, available: !!latest && compareVersions(latest, PACKAGE_VERSION) > 0 }
+  }
+
+  async function countRavenSessionBytes(sessionId: string): Promise<number> {
+    // Get last assistant message token counts (matches TUI bottom bar)
+    const messagesResp = await client.session.messages({ path: { id: sessionId }, query: { limit: 200 } })
+    const messages = (messagesResp as any)?.data ?? []
+    // Find last assistant message with output tokens (same logic as TUI subagent-footer.tsx)
+    const last = [...messages].reverse().find((m: any) =>
+      m?.info?.role === "assistant" && m?.info?.tokens?.output > 0
+    )
+    const t = last?.info?.tokens
+    if (!t) return 0
+    const totalTokens = (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+    return totalTokens * 4
   }
 
   async function getUpdateInfo(): Promise<{ current: string; latest?: string; available: boolean }> {
@@ -520,10 +536,23 @@ export default ((input: PluginInput) => {
               .map((p: any) => p.text)
             const output = textParts.join("\n") || "Raven returned no results."
 
-            // Track context saved
-            addBytes(output.length)
+            // Get total Raven session context and subtract input/output to get context saved
+            let totalProcessed = 0
+            try {
+              totalProcessed = await countRavenSessionBytes(sessionId)
+            } catch { /* best-effort */ }
+            if (totalProcessed <= 0) {
+              for (const part of parts) {
+                if (part.text) totalProcessed += part.text.length
+                if (part.args) totalProcessed += JSON.stringify(part.args).length
+                if (part.content) totalProcessed += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
+              }
+            }
+            // Context saved = total session context − input query − compact answer returned
+            const saved = Math.max(0, totalProcessed - output.length - String(args.query).length)
+            addBytes(saved)
 
-            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(output.length)}, ~${formatTokens(output.length)} tokens*` }
+            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(totalProcessed)} processed, ${formatTokens(totalProcessed)} tokens*` }
           } catch (err: any) {
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
@@ -550,7 +579,13 @@ export default ((input: PluginInput) => {
       }
     },
 
-    event() {
+    event(input: { event: any }) {
+      // Track subagent session → parent mapping for accurate context counting
+      const evt = input.event
+      if (evt?.type === "session.created" && evt?.properties?.parentID) {
+        ravenSessionParents.set(evt.properties.parentID, evt.properties.id)
+      }
+
       if (!updateToastPending) return
       updateToastPending = false
       setTimeout(() => void notifyIfUpdateAvailable(), 500)
@@ -572,7 +607,7 @@ export default ((input: PluginInput) => {
         saveConfig(config)
         output.parts.push({ type: "text", text: "Raven search interception disabled. All agents can use search tools directly." })
       } else if (arg === "stats") {
-        output.parts.push({ type: "text", text: `Raven context processed:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} tokens)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} tokens)` })
+        output.parts.push({ type: "text", text: `Raven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)` })
       } else if (arg === "update") {
         try {
           const info = await refreshUpdateInfo()
@@ -626,7 +661,7 @@ export default ((input: PluginInput) => {
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
             : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show blocked calls and context saved` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\nRaven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)\n\nCommands:\n  /raven on      — enable search interception\n  /raven off     — disable search interception\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
       }
     },
 
@@ -645,6 +680,10 @@ export default ((input: PluginInput) => {
         const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
         if (subagentType === "raven") {
           ravenTaskCalls.add(input.callID)
+          const promptField = ["prompt", "description", "request", "objective", "query"].find(
+            (f) => f in output.args
+          ) ?? "prompt"
+          ravenTaskPrompts.set(input.callID, String(output.args[promptField] ?? "").length)
         }
         if (subagentType !== "raven" && !isExcluded(subagentType)) {
           const field = ["prompt", "description", "request", "objective", "query"].find(
@@ -666,8 +705,27 @@ export default ((input: PluginInput) => {
     "tool.execute.after"(input: any, output: any) {
       if (ravenTaskCalls.has(input.callID)) {
         ravenTaskCalls.delete(input.callID)
-        const outputLen = String(output.output ?? "").length
-        if (outputLen > 0) addBytes(outputLen)
+        const promptBytes = ravenTaskPrompts.get(input.callID) ?? 0
+        ravenTaskPrompts.delete(input.callID)
+        // Try task metadata first (built-in tools preserve metadata)
+        const ravenSessionId = output.metadata?.sessionId ?? ravenSessionParents.get(input.sessionID)
+        if (ravenSessionId) {
+          if (ravenSessionParents.has(input.sessionID)) ravenSessionParents.delete(input.sessionID)
+          void countRavenSessionBytes(ravenSessionId)
+            .then((total) => {
+              const saved = Math.max(0, total - promptBytes - String(output.output ?? "").length)
+              if (saved > 0) addBytes(saved)
+            })
+            .catch(() => {
+              const outputLen = String(output.output ?? "").length
+              const saved = Math.max(0, outputLen - promptBytes)
+              if (saved > 0) addBytes(saved)
+            })
+        } else {
+          const outputLen = String(output.output ?? "").length
+          const saved = Math.max(0, outputLen - promptBytes)
+          if (saved > 0) addBytes(saved)
+        }
       }
     },
   }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.8
+
+### Fixed
+- **Accurate context saved stats** — `/raven stats` now reflects actual model token usage from `session.messages()` (last assistant message tokens × 4), not string output length. Both `raven_seek` and direct `@Raven` use the same formula: `totalSessionTokens × 4 − prompt − output`.
+
+### Changed
+- **`/raven` output** — now includes `Raven context saved` section with session and all-time totals.
+- **`/raven stats` output** — renamed from "context processed" to "context saved" with clearer labeling.
+
 ## 1.2.7
 
 ### Changed
