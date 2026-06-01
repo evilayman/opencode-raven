@@ -24,6 +24,12 @@ Raven defaults to search/fetch/docs/GitHub routing, but it works with any MCP wh
 
 Important limitation: opencode still loads enabled MCP tool schemas into the main session. Raven saves context from tool calls and raw results, but it cannot hide initial MCP schemas from the main model until opencode supports agent-scoped MCP visibility.
 
+## Example
+
+![Raven example: searching today's top 30 AI news items while saving 71K context](example.gif)
+
+In this example, the main model asks for the top 30 AI news items from today. Raven handles the noisy search/web work in a focused agent and returns the compact result, saving about 71K context that would otherwise have landed in the main session.
+
 ## Install
 
 ```bash
