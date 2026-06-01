@@ -42,8 +42,6 @@ Add Raven to your `opencode.jsonc` plugins:
 
 Restart opencode. It will resolve Raven from npm and cache the plugin automatically.
 
-If you are developing Raven locally instead of installing from npm, use a local path or package manager workflow for your opencode setup.
-
 ## Commands
 
 | Command | Action |
