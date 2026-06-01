@@ -32,13 +32,7 @@ In this example, the main model asks for the top 30 AI news items from today. Ra
 
 ## Install
 
-```bash
-bun add opencode-raven
-# or
-npm install opencode-raven
-```
-
-Then add to your `opencode.jsonc`:
+Add Raven to your `opencode.jsonc` plugins:
 
 ```jsonc
 {
@@ -46,7 +40,9 @@ Then add to your `opencode.jsonc`:
 }
 ```
 
-Restart opencode.
+Restart opencode. It will resolve Raven from npm and cache the plugin automatically.
+
+If you are developing Raven locally instead of installing from npm, use a local path or package manager workflow for your opencode setup.
 
 ## Commands
 
