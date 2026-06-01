@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1
+
+### Added
+- **Keyword tool routing** — `routeToolKeywords` and `/raven route keyword ...` route tools whose names contain a configured keyword, catching suffix-style MCP names like `web_search_exa`.
+
+### Changed
+- **Stats formula** — context saved now uses a balanced estimate: final Raven session tokens minus the first assistant turn's input/cache baseline, then minus the compact answer returned. This counts tool/web/MCP result context while avoiding Raven prompt/tool-schema overhead.
+
 ## 2.0.0
 
 ### Added

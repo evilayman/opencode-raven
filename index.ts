@@ -28,6 +28,13 @@ const DEFAULT_ROUTE_MCP_SERVERS = [
   "grep_app",
 ]
 
+const DEFAULT_ROUTE_TOOL_KEYWORDS = [
+  "search",
+  "context7",
+  "exa",
+  "grep_app",
+]
+
 const DEFAULT_MCP_SERVERS: Record<string, string> = {
   context7: "https://mcp.context7.com/mcp",
   exa: "https://mcp.exa.ai/mcp",
@@ -114,6 +121,7 @@ interface RavenConfig {
   ravenInstructions?: string
   routeTools?: string[]
   routeMcpServers?: string[]
+  routeToolKeywords?: string[]
   allowBundledMCPServers?: boolean
   excludeAgents?: string[]
   excludeTools?: string[]
@@ -132,6 +140,7 @@ const DEFAULT_CONFIG: RavenConfig = {
   ravenInstructions: "",
   routeTools: DEFAULT_ROUTE_TOOLS,
   routeMcpServers: DEFAULT_ROUTE_MCP_SERVERS,
+  routeToolKeywords: DEFAULT_ROUTE_TOOL_KEYWORDS,
   allowBundledMCPServers: true,
   excludeAgents: [],
   excludeTools: [],
@@ -238,6 +247,7 @@ export default ((input: PluginInput) => {
     normalized.ravenInstructions = typeof source.ravenInstructions === "string" ? source.ravenInstructions : DEFAULT_CONFIG.ravenInstructions
     normalized.routeTools = uniqueStrings(source.routeTools, DEFAULT_ROUTE_TOOLS)
     normalized.routeMcpServers = uniqueStrings(source.routeMcpServers, DEFAULT_ROUTE_MCP_SERVERS)
+    normalized.routeToolKeywords = uniqueStrings(source.routeToolKeywords, DEFAULT_ROUTE_TOOL_KEYWORDS)
     normalized.allowBundledMCPServers = source.allowBundledMCPServers !== false
     normalized.excludeAgents = uniqueStrings(source.excludeAgents)
     normalized.excludeTools = uniqueStrings(source.excludeTools)
@@ -273,7 +283,6 @@ export default ((input: PluginInput) => {
   let config = loadConfig()
   const ravenSessions = new Set<string>()
   const ravenTaskCalls = new Set<string>()
-  const ravenTaskPrompts = new Map<string, number>()
   const sessionAgents = new Map<string, string>()
   const ravenSessionParents = new Map<string, string>()
   let updateInfo: { current: string; latest?: string; available: boolean } | undefined
@@ -290,13 +299,15 @@ export default ((input: PluginInput) => {
   function ravenGuidance(): string {
     const tools = config.routeTools?.length ? config.routeTools.join(", ") : "none"
     const mcps = config.routeMcpServers?.length ? config.routeMcpServers.map((server) => `${server}_*`).join(", ") : "none"
-    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Routed MCP prefixes: ${mcps}. If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
+    const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "none"
+    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Routed MCP prefixes: ${mcps}. Routed tool-name keywords: ${keywords}. If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
   }
 
   function isRouteConfigured(toolName: string): boolean {
     const tool = toolName.toLowerCase()
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
     if (config.routeTools?.some((name) => name.toLowerCase() === tool)) return true
+    if (config.routeToolKeywords?.some((keyword) => tool.includes(keyword.toLowerCase()))) return true
     return config.routeMcpServers?.some((server) => tool.startsWith(`${server.toLowerCase()}_`)) ?? false
   }
 
@@ -333,7 +344,8 @@ export default ((input: PluginInput) => {
   function routeSummary(): string {
     const tools = config.routeTools?.length ? config.routeTools.join(", ") : "(none)"
     const mcps = config.routeMcpServers?.length ? config.routeMcpServers.join(", ") : "(none)"
-    return `Raven routed tools/MCPs:\n  Tools: ${tools}\n  MCP servers: ${mcps}`
+    const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "(none)"
+    return `Raven routed tools/MCPs:\n  Tools: ${tools}\n  MCP servers: ${mcps}\n  Tool keywords: ${keywords}`
   }
 
   function mcpSummary(): string {
@@ -400,18 +412,25 @@ export default ((input: PluginInput) => {
     return { current: PACKAGE_VERSION, latest, available: !!latest && compareVersions(latest, PACKAGE_VERSION) > 0 }
   }
 
-  async function countRavenSessionBytes(sessionId: string): Promise<number> {
-    // Get last assistant message token counts (matches TUI bottom bar)
+  async function countRavenSavedCandidateBytes(sessionId: string): Promise<number> {
     const messagesResp = await client.session.messages({ path: { id: sessionId }, query: { limit: 200 } })
     const messages = (messagesResp as any)?.data ?? []
-    // Find last assistant message with output tokens (same logic as TUI subagent-footer.tsx)
-    const last = [...messages].reverse().find((m: any) =>
+    const assistantMessages = messages.filter((m: any) =>
       m?.info?.role === "assistant" && m?.info?.tokens?.output > 0
     )
+    const first = assistantMessages[0]
+    const last = assistantMessages[assistantMessages.length - 1]
     const t = last?.info?.tokens
+    const firstTokens = first?.info?.tokens
     if (!t) return 0
+
+    // Balanced estimate: total Raven context minus the first-turn prompt/schema/cache baseline.
     const totalTokens = (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
-    return totalTokens * 4
+    const baselineTokens = firstTokens
+      ? (firstTokens.input ?? 0) + (firstTokens.cache?.read ?? 0) + (firstTokens.cache?.write ?? 0)
+      : 0
+    const savedCandidateTokens = Math.max(0, totalTokens - baselineTokens)
+    return savedCandidateTokens * 4
   }
 
   async function getUpdateInfo(): Promise<{ current: string; latest?: string; available: boolean }> {
@@ -593,23 +612,21 @@ export default ((input: PluginInput) => {
               .map((p: any) => p.text)
             const output = textParts.join("\n") || "Raven returned no results."
 
-            // Get total Raven session context and subtract input/output to get context saved
-            let totalProcessed = 0
+            // Context saved = Raven output/reasoning/cache context - compact answer returned to main session.
+            let savedCandidate = 0
             try {
-              totalProcessed = await countRavenSessionBytes(sessionId)
+              savedCandidate = await countRavenSavedCandidateBytes(sessionId)
             } catch { /* best-effort */ }
-            if (totalProcessed <= 0) {
+            if (savedCandidate <= 0) {
               for (const part of parts) {
-                if (part.text) totalProcessed += part.text.length
-                if (part.args) totalProcessed += JSON.stringify(part.args).length
-                if (part.content) totalProcessed += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
+                if (part.args) savedCandidate += JSON.stringify(part.args).length
+                if (part.content) savedCandidate += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
               }
             }
-            // Context saved = total session context − input query − compact answer returned
-            const saved = Math.max(0, totalProcessed - output.length - String(args.query).length)
+            const saved = Math.max(0, savedCandidate - output.length)
             addBytes(saved)
 
-            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(totalProcessed)} processed, ${formatTokens(totalProcessed)} tokens*` }
+            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*` }
           } catch (err: any) {
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
@@ -666,16 +683,16 @@ export default ((input: PluginInput) => {
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: `Raven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)` })
       } else if (arg === "route") {
-        output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>` })
+        output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>` })
       } else if (arg.startsWith("route ")) {
         const parts = raw.split(/\s+/)
         const kind = parts[1]?.toLowerCase()
         const action = parts[2]?.toLowerCase()
         const name = parts.slice(3).join(" ").trim()
-        const key = kind === "tool" ? "routeTools" : kind === "mcp" || kind === "server" ? "routeMcpServers" : undefined
+        const key = kind === "tool" ? "routeTools" : kind === "mcp" || kind === "server" ? "routeMcpServers" : kind === "keyword" ? "routeToolKeywords" : undefined
 
         if (!key || !["add", "remove", "rm"].includes(action) || !name) {
-          output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>" })
+          output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>" })
         } else {
           const values = uniqueStrings(config[key])
           const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())
@@ -738,7 +755,7 @@ export default ((input: PluginInput) => {
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
             : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\nRaven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)\n\nCommands:\n  /raven on      — enable tool/MCP routing\n  /raven off     — disable tool/MCP routing\n  /raven route   — show or edit routed tools/MCP servers\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\nRaven context saved:\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)\n\nCommands:\n  /raven on      — enable tool/MCP routing\n  /raven off     — disable tool/MCP routing\n  /raven route   — show or edit routed tools/MCP servers/keywords\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
       }
     },
 
@@ -757,10 +774,6 @@ export default ((input: PluginInput) => {
         const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
         if (subagentType === "raven") {
           ravenTaskCalls.add(input.callID)
-          const promptField = ["prompt", "description", "request", "objective", "query"].find(
-            (f) => f in output.args
-          ) ?? "prompt"
-          ravenTaskPrompts.set(input.callID, String(output.args[promptField] ?? "").length)
         }
         if (subagentType !== "raven" && !isExcluded(subagentType)) {
           const field = ["prompt", "description", "request", "objective", "query"].find(
@@ -784,26 +797,18 @@ export default ((input: PluginInput) => {
     "tool.execute.after"(input: any, output: any) {
       if (ravenTaskCalls.has(input.callID)) {
         ravenTaskCalls.delete(input.callID)
-        const promptBytes = ravenTaskPrompts.get(input.callID) ?? 0
-        ravenTaskPrompts.delete(input.callID)
         // Try task metadata first (built-in tools preserve metadata)
         const ravenSessionId = output.metadata?.sessionId ?? ravenSessionParents.get(input.sessionID)
         if (ravenSessionId) {
           if (ravenSessionParents.has(input.sessionID)) ravenSessionParents.delete(input.sessionID)
-          void countRavenSessionBytes(ravenSessionId)
+          void countRavenSavedCandidateBytes(ravenSessionId)
             .then((total) => {
-              const saved = Math.max(0, total - promptBytes - String(output.output ?? "").length)
+              const saved = Math.max(0, total - String(output.output ?? "").length)
               if (saved > 0) addBytes(saved)
             })
             .catch(() => {
-              const outputLen = String(output.output ?? "").length
-              const saved = Math.max(0, outputLen - promptBytes)
-              if (saved > 0) addBytes(saved)
+              // Without token metadata we cannot separate saved context from the compact answer.
             })
-        } else {
-          const outputLen = String(output.output ?? "").length
-          const saved = Math.max(0, outputLen - promptBytes)
-          if (saved > 0) addBytes(saved)
         }
       }
     },

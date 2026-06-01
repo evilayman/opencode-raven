@@ -1,6 +1,6 @@
 {
   "name": "opencode-raven",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Hard tool/MCP rerouter for opencode — avoids flooding and wasted context from searches, docs, web, GitHub examples, and verbose MCP calls",
   "main": "./index.ts",
   "exports": {

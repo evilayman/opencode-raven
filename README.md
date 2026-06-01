@@ -54,11 +54,13 @@ Restart opencode.
 | `/raven route tool remove <name>` | Stop routing a specific tool |
 | `/raven route mcp add <server>` | Route every tool whose name starts with `<server>_` through Raven |
 | `/raven route mcp remove <server>` | Stop routing an MCP server prefix |
+| `/raven route keyword add <keyword>` | Route any tool whose name contains `<keyword>` |
+| `/raven route keyword remove <keyword>` | Stop routing a tool-name keyword |
 | `/raven update` | Check npm for a newer Raven, clear opencode's plugin cache if needed, then restart opencode |
 | `/raven model <name>` | Change Raven's model (requires restart) |
 | `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
 | `/raven timeout <seconds>` | Change raven_seek timeout (min 10s, takes effect immediately) |
-| `/raven stats` | Show context saved (session + all-time, bytes + tokens) |
+| `/raven stats` | Show estimated context saved (session + all-time, bytes + tokens) |
 
 Config persists across restarts in `~/.config/opencode/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
@@ -122,6 +124,7 @@ Located at `~/.config/opencode/raven-config.json`. Auto-created on first run and
   "ravenInstructions": "",
   "routeTools": ["grep", "glob", "webfetch", "fetch", "bash"],
   "routeMcpServers": ["context7", "exa", "grep_app"],
+  "routeToolKeywords": ["search", "context7", "exa", "grep_app"],
   "allowBundledMCPServers": true,
   "excludeAgents": [],
   "excludeTools": [],
@@ -137,11 +140,12 @@ Located at `~/.config/opencode/raven-config.json`. Auto-created on first run and
 | `ravenInstructions` | `""` | Extra instructions appended to Raven's prompt. Useful for custom MCP usage rules. |
 | `routeTools` | built-in search/fetch tools plus `bash` | Exact tool names hard-routed through Raven. `bash` means route only search-like bash commands, not every bash call. e.g. `["grep", "glob", "bash", "linear_search_issues"]` |
 | `routeMcpServers` | `["context7", "exa", "grep_app"]` | MCP server prefixes hard-routed through Raven. `"linear"` routes tools like `linear_search_issues` and `linear_get_issue` |
+| `routeToolKeywords` | `["search", "context7", "exa", "grep_app"]` | Case-insensitive substrings hard-routed through Raven. Catches suffix-style names like `web_search_exa`. |
 | `allowBundledMCPServers` | `true` | Whether Raven auto-registers bundled Context7, Exa, and Grep.app MCP defaults. Existing `opencode.jsonc` MCP entries are never overwritten. |
 | `excludeAgents` | `[]` | Agents that bypass Raven routing (case-insensitive). e.g. `["librarian", "explorer"]` |
 | `excludeTools` | `[]` | Exact tools that never get blocked, even if matched by `routeMcpServers`. e.g. `["my_mcp_validate"]` |
 | `timeout` | `180` | Max seconds for a `raven_seek` call. On timeout the session is kept for inspection. |
-| `stats` | *(auto)* | Session + global context saved by Raven (bytes + tokens). Managed automatically. |
+| `stats` | *(auto)* | Session + global estimated context saved by Raven (bytes + tokens). Managed automatically. |
 
 ### MCP servers
 
@@ -210,6 +214,7 @@ By default, Raven routes these built-in tools and MCP server prefixes:
 |------|--------|
 | `routeTools` | `grep`, `glob`, `webfetch`, `fetch`, `bash` |
 | `routeMcpServers` | `context7`, `exa`, `grep_app` |
+| `routeToolKeywords` | `search`, `context7`, `exa`, `grep_app` |
 
 To route another MCP, add its server prefix. For example, `"linear"` routes every tool named `linear_*` through Raven:
 
@@ -224,6 +229,14 @@ This works for any MCP whose opencode tool names share a prefix. For example, if
 ```
 
 The prefix must match the actual tool name before `_`. If the tools are named `project_search`, add `project`, not the display name of the MCP. Matching is case-insensitive.
+
+If a server uses suffix-style or mixed tool names, route by keyword instead. For example, `exa` catches names like `web_search_exa` and `web_fetch_exa`:
+
+```txt
+/raven route keyword add exa
+```
+
+Keyword matching is case-insensitive and checks whether the tool name contains the keyword anywhere.
 
 If an MCP is routed but one tool should remain direct, add the exact tool to `excludeTools`:
 
@@ -271,6 +284,8 @@ The injected guidance includes the current `routeTools` and `routeMcpServers`, i
 Raven saves context from tool call results and raw MCP output by moving the work into a Raven session and returning a compact answer. It does not currently save context from MCP tool schemas that opencode loads into the main session when an MCP is enabled globally.
 
 This means large MCPs may still increase the main session's starting context. Raven still prevents repeated verbose tool outputs from accumulating in the main session.
+
+`/raven stats` uses a balanced estimate: Raven's final session token total minus the first Raven assistant turn's input/cache baseline, then minus the compact answer returned to the main session. This counts tool/web/MCP result context Raven handled while avoiding Raven's starting prompt and tool-schema overhead.
 
 ## Agent capabilities
 
