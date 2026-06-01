@@ -1,7 +1,7 @@
 {
   "name": "opencode-raven",
   "version": "2.0.1",
-  "description": "Hard tool/MCP rerouter for opencode — avoids flooding and wasted context from searches, docs, web, GitHub examples, and verbose MCP calls",
+  "description": "Raven is a context firewall for OpenCode. It routes noisy search, docs, web, GitHub, and MCP calls through a free focused agent before they hit your main model, saving cost and context!",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts"

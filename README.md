@@ -4,8 +4,8 @@
 <tr>
 <td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
-<strong>Hard tool/MCP rerouter for <a href="https://opencode.ai">opencode</a></strong><br/>
-Blocks configured tools and MCPs for non-Raven agents, then routes those requests through a focused Raven agent to avoid flooding and wasting your main model's context, mostly from searches, docs, web pages, GitHub examples, and verbose MCP calls.
+<strong>Context firewall for <a href="https://opencode.ai">OpenCode</a></strong><br/>
+Raven routes noisy search, docs, web, GitHub, and MCP calls through a free focused agent before they hit your main model, saving cost and context.
 </td>
 </tr>
 </table>

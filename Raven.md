@@ -1,5 +1,5 @@
 ---
-description: Tool/MCP delegation agent for web, docs, code, examples, and configured external systems.
+description: Context firewall for OpenCode that routes noisy search, docs, web, GitHub, and MCP calls through a free focused agent before they hit your main model.
 mode: subagent
 hidden: false
 model: opencode/deepseek-v4-flash-free
