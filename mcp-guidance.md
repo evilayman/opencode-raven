@@ -1,8 +1,10 @@
 ## Raven tool/MCP routing guidance
 
-Do not call tools or MCPs that Raven blocks directly. Raven may route search/fetch tools, docs/web/GitHub MCPs, or user-configured tools/MCP prefixes through `raven_seek` to save context.
+Do not call tools or MCPs that Raven blocks directly. Raven may route search/fetch tools, docs/web/GitHub MCPs, user-configured tool/MCP prefixes, or on-demand MCP capabilities through `raven_seek` to save context.
 
 Use `raven_seek(query="...")` as the next tool call for blocked tool/MCP requests. Include the original tool/MCP name, intent, and relevant arguments.
+
+For on-demand MCP requests, include the target MCP server and likely tool name in the `raven_seek` query when the listed capabilities make that obvious. Do not call `raven_mcp` directly unless you are Raven.
 
 Raven commonly handles:
 
@@ -13,6 +15,7 @@ Raven commonly handles:
 - docs/library/API lookup
 - public GitHub examples
 - user-configured MCP requests
+- on-demand MCPs configured in Raven, without exposing their full schemas to the main session
 - command-output or local system inspection that would otherwise use grep/rg/head over command output
 
 Examples:
