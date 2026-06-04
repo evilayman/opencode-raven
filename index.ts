@@ -27,8 +27,6 @@ const DEFAULT_ROUTE_TOOLS = [
   "bash",
 ]
 
-const DEFAULT_ROUTE_MCP_SERVERS: string[] = []
-
 const DEFAULT_ROUTE_TOOL_KEYWORDS: string[] = []
 
 const DEFAULT_ON_DEMAND_MCP_SERVERS: Record<string, OnDemandMcpServer> = {
@@ -176,7 +174,6 @@ interface RavenConfig {
   reasoning_effort?: string
   ravenInstructions?: string
   routeTools?: string[]
-  routeMcpServers?: string[]
   routeToolKeywords?: string[]
   onDemandMcpDescriptionDetail?: OnDemandMcpDescriptionDetail
   onDemandMcpServers?: Record<string, OnDemandMcpServer>
@@ -196,7 +193,6 @@ const DEFAULT_CONFIG: RavenConfig = {
   reasoning_effort: fm.reasoning_effort,
   ravenInstructions: "",
   routeTools: DEFAULT_ROUTE_TOOLS,
-  routeMcpServers: DEFAULT_ROUTE_MCP_SERVERS,
   routeToolKeywords: DEFAULT_ROUTE_TOOL_KEYWORDS,
   onDemandMcpDescriptionDetail: "full",
   onDemandMcpServers: DEFAULT_ON_DEMAND_MCP_SERVERS,
@@ -400,7 +396,6 @@ export default ((input: PluginInput) => {
     normalized.reasoning_effort = typeof source.reasoning_effort === "string" ? source.reasoning_effort : DEFAULT_CONFIG.reasoning_effort
     normalized.ravenInstructions = typeof source.ravenInstructions === "string" ? source.ravenInstructions : DEFAULT_CONFIG.ravenInstructions
     normalized.routeTools = uniqueStrings(source.routeTools, DEFAULT_ROUTE_TOOLS)
-    normalized.routeMcpServers = uniqueStrings(source.routeMcpServers, DEFAULT_ROUTE_MCP_SERVERS)
     normalized.routeToolKeywords = uniqueStrings(source.routeToolKeywords, DEFAULT_ROUTE_TOOL_KEYWORDS)
     normalized.onDemandMcpDescriptionDetail = source.onDemandMcpDescriptionDetail === "minimized" ? "minimized" : "full"
     normalized.onDemandMcpServers = source.onDemandMcpServers === undefined
@@ -481,10 +476,13 @@ export default ((input: PluginInput) => {
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
   const ravenSessionParents = new Map<string, string>()
+  let globalMcpServers: string[] = []
+  let duplicateMcpServers: string[] = []
   let updateInfo: { current: string; latest?: string; available: boolean } | undefined
   let updateCheckPromise: Promise<{ current: string; latest?: string; available: boolean }> | undefined
   let updateToastPending = false
   let mcpFailureToastPending = false
+  let duplicateMcpToastPending = false
   let mcpRefreshScheduled = false
   let mcpRefreshPromise: Promise<{ refreshed: string[]; failed: string[] }> | undefined
   let lastNotifiedMcpFailureKey = ""
@@ -514,9 +512,9 @@ export default ((input: PluginInput) => {
 
   function ravenGuidance(): string {
     const tools = config.routeTools?.length ? config.routeTools.join(", ") : "none"
-    const mcps = config.routeMcpServers?.length ? config.routeMcpServers.map((server) => `${server}_*`).join(", ") : "none"
+    const mcps = globalMcpServers.length ? globalMcpServers.map((server) => `${server}_*`).join(", ") : "none"
     const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "none"
-    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Routed MCP prefixes: ${mcps}. Routed tool-name keywords: ${keywords}. ${onDemandMcpGuidance("delegate")} If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
+    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Auto-routed global MCP prefixes: ${mcps}. Routed tool-name keywords: ${keywords}. ${onDemandMcpGuidance("delegate")} If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
   }
 
   function isRouteConfigured(toolName: string): boolean {
@@ -524,7 +522,7 @@ export default ((input: PluginInput) => {
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
     if (config.routeTools?.some((name) => name.toLowerCase() === tool)) return true
     if (config.routeToolKeywords?.some((keyword) => tool.includes(keyword.toLowerCase()))) return true
-    return config.routeMcpServers?.some((server) => tool.startsWith(`${server.toLowerCase()}_`)) ?? false
+    return globalMcpServers.some((server) => tool.startsWith(`${server.toLowerCase()}_`))
   }
 
   function compactArgs(value: any): any {
@@ -559,9 +557,10 @@ export default ((input: PluginInput) => {
 
   function routeSummary(): string {
     const tools = config.routeTools?.length ? config.routeTools.join(", ") : "(none)"
-    const mcps = config.routeMcpServers?.length ? config.routeMcpServers.join(", ") : "(none)"
+    const mcps = globalMcpServers.length ? `${globalMcpServers.join(", ")} (auto-detected)` : "none detected"
     const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "(none)"
-    return `Raven routing:\n  Routed tools: ${tools}\n  Routed global MCPs: ${mcps}\n  Routed tool keywords: ${keywords}`
+    const duplicates = duplicateMcpServers.length ? `\n  Duplicate MCP config: ${duplicateMcpServers.join(", ")} (configured globally and on-demand)` : ""
+    return `Raven routing:\n  Routed tools: ${tools}\n  Routed global MCPs: ${mcps}\n  Routed tool keywords: ${keywords}${duplicates}`
   }
 
   function mcpSummary(): string {
@@ -932,7 +931,7 @@ export default ((input: PluginInput) => {
   }
 
   function helpText(): string {
-    return `Raven commands:\n  /raven help   — show this help\n  /raven on     — enable tool/MCP routing\n  /raven off    — disable tool/MCP routing\n  /raven route  — show or edit routed tools/MCP servers/keywords\n  /raven mcp    — show or refresh on-demand MCP metadata\n  /raven update — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats  — show context saved`
+    return `Raven commands:\n  /raven help   — show this help\n  /raven on     — enable tool/MCP routing\n  /raven off    — disable tool/MCP routing\n  /raven route  — show or edit routed tools/keywords\n  /raven mcp    — show or refresh on-demand MCP metadata\n  /raven update — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats  — show context saved`
   }
 
   function formatMcpList(title: string, items: any[], fields: string[] = ["name", "description"]): string {
@@ -1134,8 +1133,29 @@ export default ((input: PluginInput) => {
     } catch { /* MCP failure notifications are best-effort */ }
   }
 
+  async function notifyIfDuplicateMcps() {
+    try {
+      if (!duplicateMcpServers.length) return
+      const label = duplicateMcpServers.length === 1 ? duplicateMcpServers[0] : `${duplicateMcpServers.length} MCPs`
+      await (client as any).tui?.showToast?.({
+        body: {
+          title: "Raven MCP duplicate config",
+          message: `${label} configured both globally and on-demand. Prefer one location to avoid duplicate schema/connection behavior.`,
+          variant: "warning",
+          duration: 12000,
+        },
+      })
+    } catch { /* duplicate MCP notifications are best-effort */ }
+  }
+
   return {
     config(configInput: any) {
+      globalMcpServers = uniqueStrings(Object.entries(configInput.mcp ?? {})
+        .filter(([, value]) => !value || typeof value !== "object" || (value as any).enabled !== false)
+        .map(([name]) => name))
+      const onDemandNames = new Set(Object.keys(config.onDemandMcpServers ?? {}).map((name) => name.toLowerCase()))
+      duplicateMcpServers = globalMcpServers.filter((name) => onDemandNames.has(name.toLowerCase()))
+
       // Inject MCP guidance as a startup instruction file (absolute path for npm compat)
       saveDynamicGuidance()
       cleanupOldRootFiles()
@@ -1174,6 +1194,7 @@ export default ((input: PluginInput) => {
       scheduleOnDemandMcpRefresh()
       updateToastPending = true
       mcpFailureToastPending = true
+      duplicateMcpToastPending = duplicateMcpServers.length > 0
     },
 
     // Register raven_seek tool — lets agents with task:false still delegate through Raven
@@ -1371,6 +1392,10 @@ export default ((input: PluginInput) => {
         mcpFailureToastPending = false
         void scheduleOnDemandMcpRefresh().then((result) => notifyIfMcpFailures(result.failed))
       }
+      if (duplicateMcpToastPending) {
+        duplicateMcpToastPending = false
+        setTimeout(() => void notifyIfDuplicateMcps(), 700)
+      }
     },
 
     // /raven help|on|off|route|mcp|model <name>|effort <value>|timeout <seconds>|stats|status
@@ -1393,16 +1418,16 @@ export default ((input: PluginInput) => {
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: statsText() })
       } else if (arg === "route") {
-        output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>` })
+        output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>\n\nGlobal MCPs are auto-routed by detected OpenCode MCP server name.` })
       } else if (arg.startsWith("route ")) {
         const parts = raw.split(/\s+/)
         const kind = parts[1]?.toLowerCase()
         const action = parts[2]?.toLowerCase()
         const name = parts.slice(3).join(" ").trim()
-        const key = kind === "tool" ? "routeTools" : kind === "mcp" || kind === "server" ? "routeMcpServers" : kind === "keyword" ? "routeToolKeywords" : undefined
+        const key = kind === "tool" ? "routeTools" : kind === "keyword" ? "routeToolKeywords" : undefined
 
         if (!key || !["add", "remove", "rm"].includes(action) || !name) {
-          output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route mcp add <server_name>\n  /raven route mcp remove <server_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>" })
+          output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>\n\nGlobal MCPs are auto-routed by detected OpenCode MCP server name." })
         } else {
           const values = uniqueStrings(config[key])
           const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())

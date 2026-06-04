@@ -54,11 +54,9 @@ Raven checks for package updates and notifies you when a newer version is availa
 | `/raven help` | Show all Raven commands |
 | `/raven on` | Enable hard tool/MCP routing (default) |
 | `/raven off` | Disable routing — all agents can use routed tools directly |
-| `/raven route` | Show routed tools, routed global MCP prefixes, and routed tool keywords |
+| `/raven route` | Show routed tools, auto-routed global MCP prefixes, and routed tool keywords |
 | `/raven route tool add <name>` | Route a specific tool through Raven |
 | `/raven route tool remove <name>` | Stop routing a specific tool |
-| `/raven route mcp add <server>` | Route every tool whose name starts with `<server>_` through Raven |
-| `/raven route mcp remove <server>` | Stop routing an MCP server prefix |
 | `/raven route keyword add <keyword>` | Route any tool whose name contains `<keyword>` |
 | `/raven route keyword remove <keyword>` | Stop routing a tool-name keyword |
 | `/raven mcp` | Show on-demand MCP status and generated metadata state |
@@ -73,6 +71,8 @@ Raven checks for package updates and notifies you when a newer version is availa
 Config persists across restarts in `~/.config/opencode/opencode-raven/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
 Raven checks configured on-demand MCPs after startup. `/raven` and `/raven mcp` show loaded, failed, and pending MCPs; loaded MCPs count toward avoided schema-load stats, while failed or pending MCPs do not. Raven shows a warning toast after startup or manual refresh if any configured on-demand MCP fails to load.
+
+Raven also warns if the same MCP server name is configured both globally in OpenCode and in Raven's `onDemandMcpServers`. Prefer one location: on-demand for schema hiding, or global only when direct main-agent access is required.
 
 ## Direct access
 
@@ -103,7 +103,6 @@ Located at `~/.config/opencode/opencode-raven/raven-config.json`. Auto-created o
   "reasoning_effort": "low",
   "ravenInstructions": "",
   "routeTools": ["grep", "glob", "webfetch", "fetch", "websearch", "bash"],
-  "routeMcpServers": [],
   "routeToolKeywords": [],
   "onDemandMcpDescriptionDetail": "full",
   "onDemandMcpServers": {
@@ -136,18 +135,17 @@ Located at `~/.config/opencode/opencode-raven/raven-config.json`. Auto-created o
 | `reasoning_effort` | *(from Raven.md)* | Override Raven's reasoning effort (e.g. `"low"`, `"medium"`, `"high"`) |
 | `ravenInstructions` | `""` | Extra instructions appended to Raven's prompt. Useful for custom MCP usage rules. |
 | `routeTools` | built-in search/fetch tools plus `bash` | Exact tool names hard-routed through Raven. `bash` means route only search-like bash commands, not every bash call. e.g. `["grep", "glob", "bash", "linear_search_issues"]` |
-| `routeMcpServers` | `[]` | MCP server prefixes hard-routed through Raven for MCPs registered globally in OpenCode. `"linear"` routes tools like `linear_search_issues` and `linear_get_issue`. On-demand MCPs do not need this. |
-| `routeToolKeywords` | `[]` | Case-insensitive substrings hard-routed through Raven for globally registered tools. Catches suffix-style names like `web_search_exa`. On-demand MCPs do not need this. |
+| `routeToolKeywords` | `[]` | Case-insensitive substrings hard-routed through Raven for globally registered tools with non-standard names. Catches suffix-style names like `web_search_exa`. On-demand MCPs do not need this. |
 | `onDemandMcpDescriptionDetail` | `"full"` | On-demand MCP guidance detail. `"full"` includes tool names/descriptions; `"minimized"` uses compact capability summaries. |
 | `onDemandMcpServers` | Context7, Exa, Grep.app | MCPs Raven connects to internally on demand, without registering their full schemas in OpenCode global MCP config. Supports `remote` and `stdio`. |
 | `excludeAgents` | `[]` | Agents that bypass Raven routing (case-insensitive). e.g. `["librarian", "explorer"]` |
-| `excludeTools` | `[]` | Exact tools that never get blocked, even if matched by `routeMcpServers`. e.g. `["my_mcp_validate"]` |
+| `excludeTools` | `[]` | Exact tools that never get blocked, even if matched by auto-routed global MCP prefixes. e.g. `["my_mcp_validate"]` |
 | `timeout` | `180` | Max seconds for a `raven_seek` call. On timeout the session is kept for inspection. |
 | `stats` | *(auto)* | Session + global estimated context saved by Raven (bytes + tokens). Managed automatically. |
 
 ### On-Demand MCP servers
 
-Raven's bundled Context7, Exa, and Grep.app MCPs are on-demand by default. They live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` instead of registering their full tool schemas in OpenCode's global MCP config. On-demand MCPs are always behind Raven and do not need `routeMcpServers` entries.
+Raven's bundled Context7, Exa, and Grep.app MCPs are on-demand by default. They live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` instead of registering their full tool schemas in OpenCode's global MCP config. On-demand MCPs are always behind Raven and do not need routing entries.
 
 All three bundled MCPs work without API keys. Add keys for higher rate limits:
 
@@ -195,7 +193,9 @@ Raven also writes generated main-model guidance to `~/.config/opencode/opencode-
 
 If you configure an MCP in OpenCode `opencode.jsonc`, OpenCode still loads it globally and its schemas may enter the main session. That can be useful for direct access, but it does not avoid initial MCP schema context. To keep schemas out of the main session, put the MCP in Raven's `onDemandMcpServers` instead.
 
-To route globally configured MCPs through Raven, keep them in `opencode.jsonc`, then add their server prefix to `routeMcpServers` if needed.
+Globally configured MCPs are auto-routed through Raven by detected OpenCode MCP server name. For example, a global MCP named `linear` auto-routes tools named `linear_*` through Raven. If a server exposes non-standard tool names, use `routeToolKeywords`.
+
+Do not configure the same MCP server name in both OpenCode and Raven unless you intentionally want OpenCode to load the global schema and Raven to maintain a separate on-demand connection. Raven warns about duplicate names at startup and in `/raven`.
 
 Use `ravenInstructions` for extra Raven-only guidance, such as how to use custom MCPs:
 
@@ -219,27 +219,14 @@ Use `ravenInstructions` for extra Raven-only guidance, such as how to use custom
 
 ### Routed tools (blocked and redirected except for Raven and any agents in `excludeAgents`)
 
-By default, Raven routes these built-in tools. Globally registered MCP routing is opt-in because bundled Context7, Exa, and Grep.app are on-demand by default:
+By default, Raven routes these built-in tools and auto-routes globally configured MCPs by detected server name. Bundled Context7, Exa, and Grep.app are on-demand by default:
 
 | Config | Default |
 |------|--------|
 | `routeTools` | `grep`, `glob`, `webfetch`, `fetch`, `websearch`, `bash` |
-| `routeMcpServers` | *(none)* |
 | `routeToolKeywords` | *(none)* |
 
-To route another MCP, add its server prefix. For example, `"linear"` routes every tool named `linear_*` through Raven:
-
-```txt
-/raven route mcp add linear
-```
-
-This works for any MCP whose opencode tool names share a prefix. For example, if an MCP exposes tools named `my_mcp_search`, `my_mcp_fetch`, and `my_mcp_get_item`, this routes all of them:
-
-```txt
-/raven route mcp add my_mcp
-```
-
-The prefix must match the actual tool name before `_`. If the tools are named `project_search`, add `project`, not the display name of the MCP. Matching is case-insensitive.
+Global MCPs configured in OpenCode are auto-routed through Raven by server name. For example, an MCP named `linear` routes tools named `linear_*`. This works for any MCP whose OpenCode tool names use the normal `<server>_<tool>` prefix. Matching is case-insensitive.
 
 If a server uses suffix-style or mixed tool names, route by keyword instead. For example, `exa` catches names like `web_search_exa` and `web_fetch_exa`:
 
@@ -253,7 +240,6 @@ If an MCP is routed but one tool should remain direct, add the exact tool to `ex
 
 ```json
 {
-  "routeMcpServers": ["context7", "exa", "grep_app", "my_mcp"],
   "excludeTools": ["my_mcp_validate"]
 }
 ```
@@ -288,7 +274,7 @@ To stop routing search-like bash commands, remove `bash` from `routeTools`:
 
 **Subagent guidance**: Every non-Raven, non-excluded subagent gets `<raven_guidance>` injected into its prompt at spawn time.
 
-The injected guidance includes the current `routeTools`, `routeMcpServers`, `routeToolKeywords`, and on-demand MCP capabilities, so subagents know which calls must go through `raven_seek`.
+The injected guidance includes the current `routeTools`, auto-detected global MCP prefixes, `routeToolKeywords`, and on-demand MCP capabilities, so subagents know which calls must go through `raven_seek`.
 
 ### What Raven Saves
 
