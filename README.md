@@ -20,9 +20,9 @@ Raven fixes three problems:
 2. **Cost** — Use a cheaper model like `opencode/deepseek-v4-flash-free` for tool-heavy work while saving your main model's context for decisions and edits.
 3. **Enforcement** — This is not soft nudging. Raven blocks configured tools/MCP prefixes for non-Raven agents and gives them the exact `raven_seek` retry path.
 
-Raven defaults to search/fetch/docs/GitHub routing, but it works with any MCP whose opencode tool names share a prefix.
+Raven defaults to routing noisy search/fetch tools, and bundles Context7, Exa, and Grep.app as on-demand MCPs that are always handled behind Raven.
 
-Important limitation: opencode still loads enabled MCP tool schemas into the main session. Raven saves context from tool calls and raw results, but it cannot hide initial MCP schemas from the main model until opencode supports agent-scoped MCP visibility.
+Important limitation: MCPs enabled directly in OpenCode config still load their tool schemas into the main session. Raven saves context from tool calls and raw results for those global MCPs, but schema hiding requires putting the MCP in Raven's `onDemandMcpServers`.
 
 ## Example
 
@@ -48,7 +48,7 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 
 | Command | Action |
 |---------|--------|
-| `/raven` | Show status — enabled/disabled, version, update availability, model, routing, reasoning effort, timeout (no args) |
+| `/raven` | Show status — enabled/disabled, version, update availability, model, routing, on-demand MCP health, stats, reasoning effort, timeout (no args) |
 | `/raven help` | Show all Raven commands |
 | `/raven on` | Enable hard tool/MCP routing (default) |
 | `/raven off` | Disable routing — all agents can use routed tools directly |
@@ -60,7 +60,7 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 | `/raven route keyword add <keyword>` | Route any tool whose name contains `<keyword>` |
 | `/raven route keyword remove <keyword>` | Stop routing a tool-name keyword |
 | `/raven mcp` | Show on-demand MCP status and generated metadata state |
-| `/raven mcp refresh [server]` | Regenerate on-demand MCP tool descriptions |
+| `/raven mcp refresh [server]` | Recheck on-demand MCP health and regenerate tool descriptions/schema estimates |
 | `/raven mcp detail full|minimized` | Choose full tool descriptions or minimized capability summaries in guidance |
 | `/raven update` | Check npm for a newer Raven, clear opencode's plugin cache if needed, then restart opencode |
 | `/raven model <name>` | Change Raven's model (requires restart) |
@@ -70,7 +70,7 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 
 Config persists across restarts in `~/.config/opencode/opencode-raven/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
-Raven shows a warning toast after startup or manual refresh if any configured on-demand MCP fails to load.
+Raven checks configured on-demand MCPs after startup. `/raven` and `/raven mcp` show loaded, failed, and pending MCPs; loaded MCPs count toward avoided schema-load stats, while failed or pending MCPs do not. Raven shows a warning toast after startup or manual refresh if any configured on-demand MCP fails to load.
 
 ## Updates
 
@@ -175,7 +175,7 @@ Located at `~/.config/opencode/opencode-raven/raven-config.json`. Auto-created o
 
 ### On-Demand MCP servers
 
-Raven's bundled Context7, Exa, and Grep.app MCPs are on-demand by default. They live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` only when needed instead of registering their full tool schemas in OpenCode's global MCP config.
+Raven's bundled Context7, Exa, and Grep.app MCPs are on-demand by default. They live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` instead of registering their full tool schemas in OpenCode's global MCP config. On-demand MCPs are always behind Raven and do not need `routeMcpServers` entries.
 
 All three bundled MCPs work without API keys. Add keys for higher rate limits:
 
@@ -237,11 +237,11 @@ Use `ravenInstructions` for extra Raven-only guidance, such as how to use custom
 
 | Hook | What it does |
 |------|--------------|
-| `config` | Registers Raven agent, loads MCP routing guidance, and schedules missing on-demand MCP metadata refresh. Bundled MCPs are on-demand by default, not injected into global OpenCode MCP config. |
+| `config` | Registers Raven agent, loads MCP routing guidance, and starts on-demand MCP health/metadata checks. Bundled MCPs are on-demand by default, not injected into global OpenCode MCP config. |
 | `tool` | Registers `raven_seek` and Raven-only `raven_mcp`. `raven_seek` creates Raven sessions with timeout, error recovery, timing, and session tree visibility. Tracks context saved for stats. |
 | `chat.message` | Tracks agent ↔ session mapping for allowlist and Raven exclusion |
-| `event` | Shows startup update notifications after the TUI event stream is ready |
-| `command.execute.before` | Handles `/raven on\|off\|route\|mcp\|update\|model\|effort\|timeout\|stats\|status` |
+| `event` | Shows startup update and MCP failure notifications after the TUI event stream is ready |
+| `command.execute.before` | Handles `/raven help\|on\|off\|route\|mcp\|update\|model\|effort\|timeout\|stats\|status` |
 | `tool.execute.before` | Hard-blocks configured tools/MCPs for non-Raven, non-excluded agents (respects `excludeTools`). Error output gives the next `raven_seek(query="...")` call. Injects dynamic `<raven_guidance>` with configured routes into subagent prompts. |
 | `tool.execute.after` | Tracks direct `@Raven` calls for context-saved stats. |
 
