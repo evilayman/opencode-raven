@@ -560,18 +560,19 @@ export default ((input: PluginInput) => {
     const tools = config.routeTools?.length ? config.routeTools.join(", ") : "(none)"
     const mcps = config.routeMcpServers?.length ? config.routeMcpServers.join(", ") : "(none)"
     const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "(none)"
-    return `Raven routed tools/MCPs:\n  Tools: ${tools}\n  MCP servers: ${mcps}\n  Tool keywords: ${keywords}`
+    return `Raven routing:\n  Routed tools: ${tools}\n  Routed global MCPs: ${mcps}\n  Routed tool keywords: ${keywords}`
   }
 
   function mcpSummary(): string {
     const buckets = onDemandMcpStatusBuckets()
     const total = buckets.loaded.length + buckets.failed.length + buckets.pending.length
-    if (!total) return `Raven on-demand MCPs: none configured. Detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`
+    if (!total) return `Raven on-demand MCPs (always behind Raven): none configured.\n  Guidance detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`
     const lines = [
-      `Raven on-demand MCPs: ${buckets.loaded.length} loaded, ${buckets.failed.length} failed, ${buckets.pending.length} pending. Detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`,
+      "Raven on-demand MCPs (always behind Raven):",
       `  Loaded: ${buckets.loaded.length ? buckets.loaded.join(", ") : "none"}`,
       `  Failed: ${buckets.failed.length ? buckets.failed.join(", ") : "none"}`,
       `  Pending: ${buckets.pending.length ? buckets.pending.join(", ") : "none"}`,
+      `  Guidance detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`,
     ]
     return lines.join("\n")
   }
@@ -927,6 +928,10 @@ export default ((input: PluginInput) => {
   function statsText(): string {
     const avoided = avoidedMcpSchemaBytes()
     return `Raven context saved:\n  Avoided MCP schema load: ${formatBytes(avoided)} (~${formatTokens(avoided)} context)\n  This session: ${formatBytes(sessionBytes)} (~${formatTokens(sessionBytes)} context)\n  All time: ${formatBytes(totalBytes)} (~${formatTokens(totalBytes)} context)`
+  }
+
+  function helpText(): string {
+    return `Raven commands:\n  /raven help   — show this help\n  /raven on     — enable tool/MCP routing\n  /raven off    — disable tool/MCP routing\n  /raven route  — show or edit routed tools/MCP servers/keywords\n  /raven mcp    — show or refresh on-demand MCP metadata\n  /raven update — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats  — show context saved`
   }
 
   function formatMcpList(title: string, items: any[], fields: string[] = ["name", "description"]): string {
@@ -1367,7 +1372,7 @@ export default ((input: PluginInput) => {
       }
     },
 
-    // /raven on|off|route|mcp|model <name>|effort <value>|timeout <seconds>|stats|status
+    // /raven help|on|off|route|mcp|model <name>|effort <value>|timeout <seconds>|stats|status
     async "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
       output.parts.length = 0
@@ -1378,6 +1383,8 @@ export default ((input: PluginInput) => {
         config.enabled = true
         saveConfig(config)
         output.parts.push({ type: "text", text: "Raven tool/MCP routing enabled. Non-Raven agents will be redirected to raven_seek for configured tools." })
+      } else if (arg === "help") {
+        output.parts.push({ type: "text", text: helpText() })
       } else if (arg === "off") {
         config.enabled = false
         saveConfig(config)
@@ -1482,7 +1489,7 @@ export default ((input: PluginInput) => {
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
             : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nCommands:\n  /raven on      — enable tool/MCP routing\n  /raven off     — disable tool/MCP routing\n  /raven route   — show or edit routed tools/MCP servers/keywords\n  /raven mcp     — show or refresh on-demand MCP metadata\n  /raven update  — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats   — show context saved` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
       }
     },
 

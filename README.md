@@ -49,9 +49,10 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 | Command | Action |
 |---------|--------|
 | `/raven` | Show status — enabled/disabled, version, update availability, model, routing, reasoning effort, timeout (no args) |
+| `/raven help` | Show all Raven commands |
 | `/raven on` | Enable hard tool/MCP routing (default) |
 | `/raven off` | Disable routing — all agents can use routed tools directly |
-| `/raven route` | Show routed tools and MCP server prefixes |
+| `/raven route` | Show routed tools, routed global MCP prefixes, and routed tool keywords |
 | `/raven route tool add <name>` | Route a specific tool through Raven |
 | `/raven route tool remove <name>` | Stop routing a specific tool |
 | `/raven route mcp add <server>` | Route every tool whose name starts with `<server>_` through Raven |
