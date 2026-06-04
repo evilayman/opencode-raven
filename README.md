@@ -22,7 +22,7 @@ Raven fixes three problems:
 
 Raven defaults to routing noisy search/fetch tools, and bundles Context7, Exa, and Grep.app as on-demand MCPs that are always handled behind Raven.
 
-Important limitation: MCPs enabled directly in OpenCode config still load their tool schemas into the main session. Raven saves context from tool calls and raw results for those global MCPs, but schema hiding requires putting the MCP in Raven's `onDemandMcpServers`.
+Important limitation: MCPs enabled directly in OpenCode config still load their tool schemas into the main session. Raven saves context from tool calls and raw results for those global MCPs, but schema hiding requires putting the MCP in Raven's `onDemandMcpServers`. **Strongly recommended:** configure noisy/search/docs/web MCPs as on-demand MCPs unless you need direct main-agent access.
 
 ## Example
 
@@ -44,6 +44,8 @@ Add Raven to your `opencode.jsonc` plugins:
 
 Restart opencode. It will resolve Raven from npm and cache the plugin automatically.
 
+Raven checks for package updates and notifies you when a newer version is available. Run `/raven update`, then restart opencode.
+
 ## Commands
 
 | Command | Action |
@@ -61,7 +63,7 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 | `/raven route keyword remove <keyword>` | Stop routing a tool-name keyword |
 | `/raven mcp` | Show on-demand MCP status and generated metadata state |
 | `/raven mcp refresh [server]` | Recheck on-demand MCP health and regenerate tool descriptions/schema estimates |
-| `/raven mcp detail full|minimized` | Choose full tool descriptions or minimized capability summaries in guidance |
+| `/raven mcp detail full\|minimized` | Choose full tool descriptions or minimized capability summaries in guidance |
 | `/raven update` | Check npm for a newer Raven, clear opencode's plugin cache if needed, then restart opencode |
 | `/raven model <name>` | Change Raven's model (requires restart) |
 | `/raven effort <value>` | Change Raven's reasoning effort (requires restart) |
@@ -71,36 +73,6 @@ Restart opencode. It will resolve Raven from npm and cache the plugin automatica
 Config persists across restarts in `~/.config/opencode/opencode-raven/raven-config.json` (global, shared across all projects). Auto-created on first run.
 
 Raven checks configured on-demand MCPs after startup. `/raven` and `/raven mcp` show loaded, failed, and pending MCPs; loaded MCPs count toward avoided schema-load stats, while failed or pending MCPs do not. Raven shows a warning toast after startup or manual refresh if any configured on-demand MCP fails to load.
-
-## Updates
-
-opencode caches npm plugins, so `"opencode-raven"` / `"opencode-raven@latest"` may not automatically refresh after a new npm release.
-
-Raven checks npm after the TUI starts. If an update is available, it shows a notification. `/raven` also shows the current version and update availability. To update:
-
-```txt
-/raven update
-```
-
-This checks npm, clears Raven's opencode plugin cache when a newer version exists, and tells you to restart opencode.
-
-Manual alternatives:
-
-```bash
-bun update --latest opencode-raven
-# or
-npm install opencode-raven@latest
-```
-
-If opencode still loads the old cached plugin, clear the opencode plugin cache and restart:
-
-```powershell
-Remove-Item -Recurse -Force "$HOME\.cache\opencode\packages\opencode-raven*"
-```
-
-```bash
-rm -rf ~/.cache/opencode/packages/opencode-raven*
-```
 
 ## Direct access
 
