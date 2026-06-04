@@ -102,7 +102,7 @@ Located at `~/.config/opencode/opencode-raven/raven-config.json`. Auto-created o
   "model": "opencode/deepseek-v4-flash-free",
   "reasoning_effort": "low",
   "ravenInstructions": "",
-  "routeTools": ["grep", "glob", "webfetch", "fetch", "bash"],
+  "routeTools": ["grep", "glob", "webfetch", "fetch", "websearch", "bash"],
   "routeMcpServers": [],
   "routeToolKeywords": [],
   "onDemandMcpDescriptionDetail": "full",
@@ -223,7 +223,7 @@ By default, Raven routes these built-in tools. Globally registered MCP routing i
 
 | Config | Default |
 |------|--------|
-| `routeTools` | `grep`, `glob`, `webfetch`, `fetch`, `bash` |
+| `routeTools` | `grep`, `glob`, `webfetch`, `fetch`, `websearch`, `bash` |
 | `routeMcpServers` | *(none)* |
 | `routeToolKeywords` | *(none)* |
 

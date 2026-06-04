@@ -23,6 +23,7 @@ const DEFAULT_ROUTE_TOOLS = [
   "glob",
   "webfetch",
   "fetch",
+  "websearch",
   "bash",
 ]
 

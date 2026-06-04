@@ -19,6 +19,7 @@
 - **On-demand MCP health** — `/raven` and `/raven mcp` now show loaded, failed, and pending MCPs based on current-run connection checks instead of stale generated metadata.
 - **Shorter status output** — `/raven` now points to `/raven help` instead of printing the full command list inline.
 - **Clearer routing labels** — `/raven` now distinguishes routed global MCPs from on-demand MCPs, which are always behind Raven.
+- **Default routed tools** — `websearch` is routed by default because it is a built-in OpenCode search tool.
 
 ## 2.0.1
 
