@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1
+
+### Changed
+- **Context unit formatting** — context estimates now switch from `K` to `M` after one million tokens for easier reading.
+
 ## 2.1.0
 
 ### Added

@@ -994,7 +994,9 @@ export default ((input: PluginInput) => {
 
   function formatTokens(bytes: number): string {
     const tokens = Math.round(bytes / 4)
-    return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : `${tokens}`
+    return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M`
+      : tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K`
+      : `${tokens}`
   }
 
   function compareVersions(a: string, b: string): number {
