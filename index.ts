@@ -591,8 +591,9 @@ export default ((input: PluginInput) => {
 
   function onDemandMcpGuidance(target: "delegate" | "raven" = "delegate"): string {
     const servers = config.onDemandMcpServers ?? {}
-    const entries = Object.entries(servers)
-    if (!entries.length) return "No on-demand MCPs are configured."
+    const entries = Object.entries(servers).filter(([name]) => onDemandMcpRuntimeStatus(name) === "ready")
+    if (!Object.keys(servers).length) return "No on-demand MCPs are configured."
+    if (!entries.length) return "No loaded on-demand MCPs are available."
 
     const detail = config.onDemandMcpDescriptionDetail ?? "full"
     const lines = entries.map(([name, server]) => {
