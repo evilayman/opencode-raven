@@ -898,6 +898,7 @@ export default ((input: PluginInput) => {
     else delete next.lastError
     mcpMetadata[name] = next
     saveMcpMetadata(mcpMetadata)
+    saveDynamicGuidance()
     return name
   }
 
@@ -1159,8 +1160,8 @@ export default ((input: PluginInput) => {
       const onDemandNames = new Set(Object.keys(config.onDemandMcpServers ?? {}).map((name) => name.toLowerCase()))
       duplicateMcpServers = globalMcpServers.filter((name) => onDemandNames.has(name.toLowerCase()))
 
-      // Inject MCP guidance as a startup instruction file (absolute path for npm compat)
-      saveDynamicGuidance()
+      // Inject MCP guidance as a startup instruction file (absolute path for npm compat).
+      // The file is regenerated after MCP health checks, not during the startup pending reset.
       cleanupOldRootFiles()
       configInput.instructions = configInput.instructions || []
       if (!configInput.instructions.includes(MCP_GUIDANCE_MD)) {
