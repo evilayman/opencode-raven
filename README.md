@@ -4,15 +4,29 @@
 <tr>
 <td><img src="Raven.png" alt="Raven" width="768" /></td>
 <td>
-<strong>Context firewall for <a href="https://opencode.ai">OpenCode</a></strong><br/>
-Raven routes noisy search, docs, web, GitHub, and MCP calls through a free focused agent before they hit your main model, saving cost and context.
+<strong>Search tools now, on-demand MCPs when you want them, without flooding your <a href="https://opencode.ai">OpenCode</a> context</strong><br/>
+Install Raven, restart OpenCode, and you get routed search tools plus on-demand MCP support for any MCP you want to add. Context7, Exa, and Grep.app are bundled as ready-to-use defaults. Raven keeps noisy tool work and optional MCP schemas behind a focused agent, then returns compact answers to your main model.
 </td>
 </tr>
 </table>
 
-## What Raven Does
+## Why Use Raven?
 
-Tool-heavy work floods context. Search, docs, web, GitHub examples, and verbose MCP calls can dump raw results into your expensive main model. Raven is a hard blocker-rerouter: configured tools fail closed for non-Raven agents and must be delegated through `raven_seek`, where a focused Raven agent performs the work and returns a compact answer.
+Raven is meant to make OpenCode easier to use, not harder to configure: useful search tools by default, optional MCPs on demand.
+
+After adding the plugin and restarting OpenCode, Raven is already ready for common tool-heavy work:
+
+1. Search the web with Exa.
+2. Look up library docs with Context7.
+3. Search public GitHub code with Grep.app.
+4. Route noisy local search, fetch, and bash discovery through Raven.
+5. Keep raw tool output and large MCP schemas out of your main model context.
+
+You can use it immediately for search/docs/web/GitHub work, then add more MCPs later with one `onDemandMcpServers` config entry when you want extra capabilities.
+
+## How Raven Helps
+
+Tool-heavy work is useful, but it can flood your main model with raw search results, docs pages, GitHub examples, and MCP output. Raven sits between your main agent and noisy tools. It sends that work to a focused Raven agent, then returns a compact answer.
 
 Raven fixes three problems:
 
@@ -20,9 +34,7 @@ Raven fixes three problems:
 2. **Cost** - Use a cheaper model like `opencode/deepseek-v4-flash-free` for tool-heavy work while saving your main model's context for decisions and edits.
 3. **Enforcement** - This is not soft nudging. Raven blocks configured tools/MCP prefixes for non-Raven agents and gives them the exact `raven_seek` retry path.
 
-Raven defaults to routing noisy search/fetch tools and bundles Context7, Exa, and Grep.app as on-demand MCPs that are always handled behind Raven.
-
-Important limitation: MCPs enabled directly in OpenCode config still load their tool schemas into the main session. Raven saves context from tool calls and raw results for those global MCPs, but schema hiding requires putting the MCP in Raven's `onDemandMcpServers`. **Strongly recommended:** configure noisy/search/docs/web MCPs as on-demand MCPs unless you need direct main-agent access.
+Raven defaults to routing noisy search/fetch tools and supports any MCP as an on-demand MCP. Context7, Exa, and Grep.app are bundled as defaults. Search works out of the box, and extra MCPs stay optional and on demand.
 
 ## Install
 
@@ -35,6 +47,8 @@ Add Raven to your `opencode.jsonc` plugins:
 ```
 
 Restart opencode. It will resolve Raven from npm and cache the plugin automatically.
+
+That is enough to start using Raven. The default config already includes routed search/fetch tools and bundled on-demand MCPs for Context7, Exa, and Grep.app. Add any other MCP under `onDemandMcpServers` only if you want more capabilities.
 
 Raven checks for package updates and notifies you when a newer version is available. Run `/raven update`, then restart opencode.
 
@@ -88,13 +102,17 @@ In this example, the main model asks for the top 30 AI news items from today. Ra
 
 ## Recommended MCP Setup
 
-Raven's bundled Context7, Exa, and Grep.app MCPs are on-demand by default. They live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` instead of registering their full tool schemas in OpenCode's global MCP config.
+You do not need to configure MCPs just to try Raven. Raven gives you the search tools up front, supports any MCP as an on-demand MCP, and bundles Context7, Exa, and Grep.app as defaults. Add more MCPs only when you want extra capabilities.
+
+On-demand MCPs live in `onDemandMcpServers`, so Raven connects to them internally through `raven_mcp` only when needed instead of registering their full tool schemas in OpenCode's global MCP config. Context7, Exa, and Grep.app are included there by default, but the same setup works for any remote or stdio MCP you want to add.
 
 On-demand MCPs are always behind Raven and do not need routing entries.
 
 Raven checks configured on-demand MCPs after startup. `/raven` and `/raven mcp` show loaded, failed, and pending MCPs. Loaded MCPs count toward avoided schema-load stats, while failed or pending MCPs do not. Raven shows a warning toast after startup or manual refresh if any configured on-demand MCP fails to load.
 
 Raven also warns if the same MCP server name is configured both globally in OpenCode and in Raven's `onDemandMcpServers`. Prefer one location: on-demand for schema hiding, or global only when direct main-agent access is required.
+
+Important limitation: MCPs enabled directly in OpenCode config still load their tool schemas into the main session. Raven saves context from tool calls and raw results for those global MCPs, but schema hiding requires putting the MCP in Raven's `onDemandMcpServers`. **Strongly recommended:** configure noisy/search/docs/web MCPs as on-demand MCPs unless you need direct main-agent access.
 
 All three bundled MCPs work without API keys. Add keys for higher rate limits:
 
@@ -118,6 +136,12 @@ To add an API key to an on-demand MCP, edit Raven config:
   }
 }
 ```
+
+### Add Your Own On-Demand MCP
+
+To add another MCP, put it under `onDemandMcpServers`. Raven will connect to it only when needed, discover its tools, and generate guidance automatically. Your main model does not need to load that MCP's full schema up front.
+
+Use `remote` for hosted MCPs and `stdio` for local command-based MCPs.
 
 To add a local stdio MCP:
 
