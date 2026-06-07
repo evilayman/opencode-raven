@@ -2,8 +2,8 @@
 
 <table>
 <tr>
-<td width="35%"><img src="Raven.png" alt="Raven" width="100%" /></td>
-<td width="65%">
+<td width="50%"><img src="Raven.png" alt="Raven" width="100%" /></td>
+<td>
 Raven gives OpenCode useful search tools by default and optional on-demand MCPs for any remote or stdio MCP you want to add. It keeps noisy tool work behind a focused Raven agent, so your main model gets compact answers instead of raw search results, docs pages, GitHub examples, MCP output, or large MCP schemas.
 
 ## Why Use Raven?
