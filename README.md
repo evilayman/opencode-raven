@@ -2,39 +2,27 @@
 
 <table>
 <tr>
-<td><img src="Raven.png" alt="Raven" width="768" /></td>
-<td>
-<strong>Search tools now, on-demand MCPs when you want them, without flooding your <a href="https://opencode.ai">OpenCode</a> context</strong><br/>
-Install Raven, restart OpenCode, and you get routed search tools plus on-demand MCP support for any MCP you want to add. Context7, Exa, and Grep.app are bundled as ready-to-use defaults. Raven keeps noisy tool work and optional MCP schemas behind a focused agent, then returns compact answers to your main model.
+<td width="40%"><img src="Raven.png" alt="Raven" width="100%" /></td>
+<td width="60%">
+Raven gives OpenCode useful search tools by default and optional on-demand MCPs for any remote or stdio MCP you want to add. It keeps noisy tool work behind a focused Raven agent, so your main model gets compact answers instead of raw search results, docs pages, GitHub examples, MCP output, or large MCP schemas.
+
+## Why Use Raven?
+
+* Routed search, fetch, and bash discovery work through Raven.
+* Context7, Exa, and Grep.app are bundled as on-demand MCP defaults.
+* Any extra MCP can be added under `onDemandMcpServers` when you want it.
+* Configured noisy tools and MCPs are blocked for non-Raven agents and forced through `raven_seek`.
 </td>
 </tr>
 </table>
 
-## Why Use Raven?
+## Example
 
-Raven is meant to make OpenCode easier to use, not harder to configure: useful search tools by default, optional MCPs on demand.
+<p align="center">
+  <img src="example.gif" alt="Raven example: searching today's top 30 AI news items while saving 71K context" />
+</p>
 
-After adding the plugin and restarting OpenCode, Raven is already ready for common tool-heavy work:
-
-1. Search the web with Exa.
-2. Look up library docs with Context7.
-3. Search public GitHub code with Grep.app.
-4. Route noisy local search, fetch, and bash discovery through Raven.
-5. Keep raw tool output and large MCP schemas out of your main model context.
-
-You can use it immediately for search/docs/web/GitHub work, then add more MCPs later with one `onDemandMcpServers` config entry when you want extra capabilities.
-
-## How Raven Helps
-
-Tool-heavy work is useful, but it can flood your main model with raw search results, docs pages, GitHub examples, and MCP output. Raven sits between your main agent and noisy tools. It sends that work to a focused Raven agent, then returns a compact answer.
-
-Raven fixes three problems:
-
-1. **Context flooding** - Keep noisy tool results out of the main session. Raven summarizes tool/MCP output before returning it.
-2. **Cost** - Use a cheaper model like `opencode/deepseek-v4-flash-free` for tool-heavy work while saving your main model's context for decisions and edits.
-3. **Enforcement** - This is not soft nudging. Raven blocks configured tools/MCP prefixes for non-Raven agents and gives them the exact `raven_seek` retry path.
-
-Raven defaults to routing noisy search/fetch tools and supports any MCP as an on-demand MCP. Context7, Exa, and Grep.app are bundled as defaults. Search works out of the box, and extra MCPs stay optional and on demand.
+In this example, the main model asks for the top 30 AI news items from today. Raven handles the noisy search/web work in a focused agent and returns the compact result, saving about 71K context that would otherwise have landed in the main session.
 
 ## Install
 
@@ -91,14 +79,6 @@ The main agent does not see Raven's internal tool calls or raw tool output, just
 | `/raven stats` | Show estimated context saved, including avoided MCP schema load, session, and all-time totals |
 
 Config persists across restarts in `~/.config/opencode/opencode-raven/raven-config.json`. It is global and shared across all projects.
-
-## Example
-
-<p align="center">
-  <img src="example.gif" alt="Raven example: searching today's top 30 AI news items while saving 71K context" />
-</p>
-
-In this example, the main model asks for the top 30 AI news items from today. Raven handles the noisy search/web work in a focused agent and returns the compact result, saving about 71K context that would otherwise have landed in the main session.
 
 ## Recommended MCP Setup
 
