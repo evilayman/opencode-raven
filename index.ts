@@ -31,16 +31,19 @@ const DEFAULT_ROUTE_TOOL_KEYWORDS: string[] = []
 
 const DEFAULT_ON_DEMAND_MCP_SERVERS: Record<string, OnDemandMcpServer> = {
   context7: {
+    enabled: true,
     type: "remote",
     url: "https://mcp.context7.com/mcp",
     description: "Library/framework documentation lookup.",
   },
   exa: {
+    enabled: true,
     type: "remote",
     url: "https://mcp.exa.ai/mcp",
     description: "Live web search and webpage fetching.",
   },
   grep_app: {
+    enabled: true,
     type: "remote",
     url: "https://mcp.grep.app",
     description: "Public GitHub code search and real-world examples.",
@@ -138,6 +141,8 @@ interface OnDemandMcpToolInfo {
 }
 
 interface BaseOnDemandMcpServer {
+  enabled?: boolean
+  timeout?: number
   description?: string
 }
 
@@ -154,17 +159,17 @@ interface RemoteOnDemandMcpServer extends BaseOnDemandMcpServer {
   type: "remote"
   url: string
   headers?: Record<string, string>
+  oauth?: Record<string, unknown> | false
 }
 
-interface StdioOnDemandMcpServer extends BaseOnDemandMcpServer {
-  type: "stdio"
-  command: string
-  args?: string[]
-  env?: Record<string, string>
+interface LocalOnDemandMcpServer extends BaseOnDemandMcpServer {
+  type: "local"
+  command: string[]
+  environment?: Record<string, string>
   cwd?: string
 }
 
-type OnDemandMcpServer = RemoteOnDemandMcpServer | StdioOnDemandMcpServer
+type OnDemandMcpServer = RemoteOnDemandMcpServer | LocalOnDemandMcpServer
 type OnDemandMcpDescriptionDetail = "full" | "minimized"
 type RavenMcpOperation = "list_tools" | "call_tool" | "list_resources" | "read_resource" | "list_prompts" | "get_prompt"
 
@@ -303,32 +308,45 @@ function normalizeToolInfo(value: unknown): OnDemandMcpToolInfo[] | undefined {
   return tools.length ? tools : undefined
 }
 
+function normalizeStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+  return entries.length ? Object.fromEntries(entries) : undefined
+}
+
 function normalizeOnDemandMcpServer(value: unknown): OnDemandMcpServer | undefined {
   if (!value || typeof value !== "object") return undefined
   const source = value as Record<string, any>
   const base = {
+    enabled: source.enabled !== false,
+    ...(typeof source.timeout === "number" && source.timeout > 0 ? { timeout: Math.floor(source.timeout) } : {}),
     ...(typeof source.description === "string" && source.description.trim() ? { description: source.description.trim() } : {}),
   }
 
-  if (source.type === "stdio") {
-    if (typeof source.command !== "string" || !source.command.trim()) return undefined
+  if (source.type === "local") {
+    const commandParts = Array.isArray(source.command)
+      ? source.command.filter((arg: unknown): arg is string => typeof arg === "string" && arg.trim())
+      : []
+    if (!commandParts.length) return undefined
+    const environment = normalizeStringRecord(source.environment)
     return {
       ...base,
-      type: "stdio",
-      command: source.command.trim(),
-      ...(Array.isArray(source.args) ? { args: source.args.filter((arg: unknown) => typeof arg === "string") } : {}),
-      ...(source.env && typeof source.env === "object" ? { env: Object.fromEntries(Object.entries(source.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) } : {}),
+      type: "local",
+      command: commandParts,
+      ...(environment ? { environment } : {}),
       ...(typeof source.cwd === "string" && source.cwd.trim() ? { cwd: source.cwd.trim() } : {}),
     }
   }
 
   if (source.type === "remote" || typeof source.url === "string") {
     if (typeof source.url !== "string" || !source.url.trim()) return undefined
+    const headers = normalizeStringRecord(source.headers)
     return {
       ...base,
       type: "remote",
       url: source.url.trim(),
-      ...(source.headers && typeof source.headers === "object" ? { headers: Object.fromEntries(Object.entries(source.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string")) } : {}),
+      ...(headers ? { headers } : {}),
+      ...(source.oauth === false ? { oauth: false } : source.oauth && typeof source.oauth === "object" ? { oauth: source.oauth } : {}),
     }
   }
 
@@ -491,7 +509,7 @@ export default ((input: PluginInput) => {
 
   function resetOnDemandMcpRuntimeStatuses() {
     let changed = false
-    for (const name of Object.keys(config.onDemandMcpServers ?? {})) {
+    for (const [name] of activeOnDemandMcpEntries()) {
       const metadata = mcpMetadata[name] ?? {}
       if (metadata.status !== "pending" || metadata.lastError || metadata.lastCheckedAt) {
         mcpMetadata[name] = { ...metadata, status: "pending" }
@@ -591,8 +609,10 @@ export default ((input: PluginInput) => {
 
   function onDemandMcpGuidance(target: "delegate" | "raven" = "delegate"): string {
     const servers = config.onDemandMcpServers ?? {}
-    const entries = Object.entries(servers).filter(([name]) => onDemandMcpRuntimeStatus(name) === "ready")
+    const activeEntries = activeOnDemandMcpEntries()
+    const entries = activeEntries.filter(([name]) => onDemandMcpRuntimeStatus(name) === "ready")
     if (!Object.keys(servers).length) return "No on-demand MCPs are configured."
+    if (!activeEntries.length) return "No enabled on-demand MCPs are configured."
     if (!entries.length) return "No loaded on-demand MCPs are available."
 
     const detail = config.onDemandMcpDescriptionDetail ?? "full"
@@ -694,22 +714,29 @@ export default ((input: PluginInput) => {
   }
 
   function getOnDemandMcpServer(serverName: string): [string, OnDemandMcpServer] | undefined {
-    const entries = Object.entries(config.onDemandMcpServers ?? {})
+    const entries = activeOnDemandMcpEntries()
     return entries.find(([name]) => name.toLowerCase() === serverName.toLowerCase())
   }
 
+  function activeOnDemandMcpEntries(): [string, OnDemandMcpServer][] {
+    return Object.entries(config.onDemandMcpServers ?? {}).filter(([, server]) => server.enabled !== false)
+  }
+
   async function connectOnDemandMcp(serverName: string, server: OnDemandMcpServer): Promise<McpConnection> {
-    const timeout = (config.timeout ?? 180) * 1000
+    const timeout = server.timeout ?? (config.timeout ?? 180) * 1000
     const client = new Client({ name: PACKAGE_NAME, version: PACKAGE_VERSION })
 
-    if (server.type === "stdio") {
-      const env = { ...cleanProcessEnv(), ...resolveStringRecord(server.env) }
+    if (server.type === "local") {
+      const env = { ...cleanProcessEnv(), ...resolveStringRecord(server.environment) }
       const transport = new StdioClientTransport({
-        command: resolveEnvPlaceholders(server.command),
-        args: server.args?.map((arg) => resolveEnvPlaceholders(arg)),
+        command: resolveEnvPlaceholders(server.command[0]),
+        args: server.command.slice(1).map((arg) => resolveEnvPlaceholders(arg)),
         env,
+        stderr: "pipe",
         cwd: server.cwd ? resolveEnvPlaceholders(server.cwd) : undefined,
       })
+      transport.stderr?.on("data", () => {})
+      transport.stderr?.on("error", () => {})
       await withTimeout(client.connect(transport), timeout, `Connecting to ${serverName}`)
       return { client, transport, serverName, lastUsed: Date.now() }
     }
@@ -800,7 +827,7 @@ export default ((input: PluginInput) => {
   }
 
   async function refreshOnDemandMcpDescriptions(force = false, serverName?: string): Promise<{ refreshed: string[]; failed: string[] }> {
-    const entries = Object.entries(config.onDemandMcpServers ?? {})
+    const entries = activeOnDemandMcpEntries()
       .filter(([name]) => !serverName || name.toLowerCase() === serverName.toLowerCase())
       .filter(([name]) => {
         const metadata = mcpMetadata[name]
@@ -870,7 +897,7 @@ export default ((input: PluginInput) => {
 
   function onDemandMcpStatusBuckets(): { loaded: string[]; failed: string[]; pending: string[] } {
     const buckets = { loaded: [] as string[], failed: [] as string[], pending: [] as string[] }
-    for (const name of Object.keys(config.onDemandMcpServers ?? {})) {
+    for (const [name] of activeOnDemandMcpEntries()) {
       const status = onDemandMcpRuntimeStatus(name)
       if (status === "ready") buckets.loaded.push(name)
       else if (status === "failed") buckets.failed.push(name)
@@ -880,7 +907,7 @@ export default ((input: PluginInput) => {
   }
 
   function failedOnDemandMcpNames(names?: string[]): string[] {
-    const configured = Object.keys(config.onDemandMcpServers ?? {})
+    const configured = activeOnDemandMcpEntries().map(([name]) => name)
     const wanted = names?.length ? names : configured
     return wanted.filter((name) => configured.includes(name) && onDemandMcpRuntimeStatus(name) === "failed")
   }
@@ -903,8 +930,9 @@ export default ((input: PluginInput) => {
   }
 
   function onDemandMcpStatus(): string {
-    const entries = Object.entries(config.onDemandMcpServers ?? {})
-    if (!entries.length) return "Raven on-demand MCPs: none configured."
+    const entries = activeOnDemandMcpEntries()
+    if (!Object.keys(config.onDemandMcpServers ?? {}).length) return "Raven on-demand MCPs: none configured."
+    if (!entries.length) return "Raven on-demand MCPs: none enabled."
     const buckets = onDemandMcpStatusBuckets()
     const lines = entries.map(([name, server]) => {
       const metadata = mcpMetadata[name]
@@ -920,7 +948,7 @@ export default ((input: PluginInput) => {
   }
 
   function avoidedMcpSchemaBytes(): number {
-    return Object.keys(config.onDemandMcpServers ?? {}).reduce((sum, name) => {
+    return activeOnDemandMcpEntries().reduce((sum, [name]) => {
       const metadata = mcpMetadata[name]
       if (onDemandMcpRuntimeStatus(name) !== "ready") return sum
       return sum + Math.max(0, metadata?.avoidedSchemaBytes ?? 0)
@@ -1157,7 +1185,7 @@ export default ((input: PluginInput) => {
       globalMcpServers = uniqueStrings(Object.entries(configInput.mcp ?? {})
         .filter(([, value]) => !value || typeof value !== "object" || (value as any).enabled !== false)
         .map(([name]) => name))
-      const onDemandNames = new Set(Object.keys(config.onDemandMcpServers ?? {}).map((name) => name.toLowerCase()))
+      const onDemandNames = new Set(activeOnDemandMcpEntries().map(([name]) => name.toLowerCase()))
       duplicateMcpServers = globalMcpServers.filter((name) => onDemandNames.has(name.toLowerCase()))
 
       // Inject MCP guidance as a startup instruction file (absolute path for npm compat).

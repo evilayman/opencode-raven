@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.2
+
+### Fixed
+- **Local MCP TUI output** — local on-demand MCP stderr is now piped and drained so server logs do not overlay the OpenCode TUI during startup checks or Raven MCP calls.
+
+### Changed
+- **OpenCode-style MCP config** — on-demand MCPs now accept OpenCode-style `local` and `remote` entries, including local `command` arrays, `environment`, per-server `timeout`, and `enabled` flags.
+
 ## 2.1.1
 
 ### Changed
