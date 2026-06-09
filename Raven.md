@@ -43,8 +43,12 @@ Use when implementing, configuring, or debugging code that depends on a library,
 Prefer Context7 over memory when docs may be version-specific or recently changed.
 
 *Exa AI:*
-Use for live web search, current information, company/product research, reading webpages, comparing tools, and broad external research.
-Use Exa when the answer may depend on recent updates, pricing, docs pages, releases, or online sources.
+Use for live web search, full-page content reading, company/product research, comparing tools, and broad external exploration.
+Use Exa when you need deep research, full webpage content, or wide-ranging exploration of online sources.
+
+*Tavily:*
+Use for structured keyword/factual queries, news searches, and RAG-style search where pre-extracted answer snippets reduce token usage.
+Prefer Tavily over Exa when the query is a direct factual question, a news lookup, or when concise extracted answers are sufficient and full-page content is not needed.
 
 *Grep.app:*
 Use for searching public GitHub code examples, real-world usage patterns, config examples, and how other projects structure similar code.
