@@ -4,6 +4,8 @@
 
 ### Changed
 - **Default timeout** — Raven's default timeout is now 600s.
+- **Provider errors** — `raven_seek` now reports Raven provider/API retry failures and no-initial-response startup failures quickly instead of waiting for the full timeout.
+- **Raven recovery** — after a Raven provider failure, routed tools stop redirecting to `raven_seek` and tell the user how to switch Raven's model.
 
 ## 2.1.2
 

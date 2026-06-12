@@ -494,6 +494,8 @@ export default ((input: PluginInput) => {
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
   const ravenSessionParents = new Map<string, string>()
+  const ravenErrorWaiters = new Map<string, (error: Error) => void>()
+  const ravenProgressWaiters = new Map<string, () => void>()
   let globalMcpServers: string[] = []
   let duplicateMcpServers: string[] = []
   let updateInfo: { current: string; latest?: string; available: boolean } | undefined
@@ -504,6 +506,7 @@ export default ((input: PluginInput) => {
   let mcpRefreshScheduled = false
   let mcpRefreshPromise: Promise<{ refreshed: string[]; failed: string[] }> | undefined
   let lastNotifiedMcpFailureKey = ""
+  let ravenProviderIssue: string | undefined
 
   resetOnDemandMcpRuntimeStatuses()
 
@@ -570,7 +573,24 @@ export default ((input: PluginInput) => {
   }
 
   function rerouteMessage(tool: string, args: any): string {
+    if (ravenProviderIssue) {
+      return `Raven is currently unavailable: ${ravenProviderIssue}
+
+${ravenRecoveryInstructions()}`
+    }
     return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_seek(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
+  }
+
+  function ravenRecoveryInstructions(): string {
+    return `Stop trying Raven-routed tools or MCPs for this request. Inform the user that Raven cannot run until its model/provider is changed or fixed.
+
+Tell the user to switch Raven's model with:
+  /raven model <provider/model>
+
+Example:
+  /raven model openai/gpt-5.5
+
+Then restart opencode for the model change to take effect. If the task can be completed without Raven, continue without routed tools and clearly mention what could not be checked.`
   }
 
   function routeSummary(): string {
@@ -671,6 +691,49 @@ export default ((input: PluginInput) => {
     } finally {
       if (timer) clearTimeout(timer)
     }
+  }
+
+  function providerErrorMessage(error: any): string {
+    const name = String(error?.name ?? "")
+    const data = error?.data && typeof error.data === "object" ? error.data : {}
+    const status = typeof data.statusCode === "number" ? ` HTTP ${data.statusCode}.` : ""
+    const body = typeof data.responseBody === "string" && data.responseBody.trim() ? ` ${truncateText(data.responseBody, 500)}` : ""
+    const message = String(data.message ?? error?.message ?? error ?? "Unknown provider error")
+    return `Raven provider/API error${name ? ` (${name})` : ""}.${status} ${message}${body}`.trim()
+  }
+
+  function waitForRavenProviderError(sessionId: string): Promise<never> {
+    return new Promise((_resolve, reject) => {
+      ravenErrorWaiters.set(sessionId, reject)
+    })
+  }
+
+  function waitForRavenFirstProgress(sessionId: string, ms: number): Promise<never> {
+    return new Promise((_resolve, reject) => {
+      const timer = setTimeout(() => {
+        ravenProgressWaiters.delete(sessionId)
+        reject(new Error(`Raven did not produce an initial response within ${Math.round(ms / 1000)}s. If the Raven provider showed a retry dialog, this is likely an auth/quota/subscription issue. Check the Raven subagent/provider account, or retry after switching Raven to a working model.`))
+      }, ms)
+      ravenProgressWaiters.set(sessionId, () => {
+        clearTimeout(timer)
+        ravenProgressWaiters.delete(sessionId)
+      })
+    })
+  }
+
+  function reportRavenProviderError(sessionId: string, error: any) {
+    const waiter = ravenErrorWaiters.get(sessionId)
+    if (!waiter) return
+    waiter(new Error(providerErrorMessage(error)))
+  }
+
+  function reportRavenProgress(sessionId: string) {
+    ravenProgressWaiters.get(sessionId)?.()
+  }
+
+  function clearRavenWaiters(sessionId: string) {
+    ravenErrorWaiters.delete(sessionId)
+    ravenProgressWaiters.get(sessionId)?.()
   }
 
   type McpConnection = {
@@ -1238,7 +1301,7 @@ export default ((input: PluginInput) => {
         },
         async execute(args, context) {
           const started = Date.now()
-          const timeout = (config.timeout ?? 180) * 1000
+          const timeout = (config.timeout ?? 600) * 1000
           try {
             // Create a Raven session
             const session = await client.session.create({
@@ -1266,55 +1329,76 @@ export default ((input: PluginInput) => {
               appendFileSync(logFile, `${ts} ${sessionId} "${q}"\n`)
             } catch { /* non-fatal */ }
 
-            // Send the query to Raven with timeout
-            const result = await Promise.race([
-              client.session.prompt({
-                path: { id: sessionId },
-                body: {
-                  agent: "raven",
-                  parts: [{ type: "text", text: args.query }],
-                },
-              }),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`Raven timed out after ${timeout / 1000}s — session kept: ${sessionId}`)), timeout)
-              ),
-            ])
-
-            const elapsed = ((Date.now() - started) / 1000).toFixed(1)
-
-            // Extract text from the response
-            const parts = (result as any)?.data?.parts ?? []
-            const textParts = parts
-              .filter((p: any) => p.type === "text" && p.text)
-              .map((p: any) => p.text)
-            const output = textParts.join("\n") || "Raven returned no results."
-
-            // Context saved = Raven output/reasoning/cache context - compact answer returned to main session.
-            let savedCandidate = 0
+            // Send the query to Raven with timeout. Provider/API errors are also
+            // surfaced through message.updated events; fail as soon as one lands
+            // so the caller does not wait for the full timeout on quota/auth issues.
+            let timer: ReturnType<typeof setTimeout> | undefined
+            const providerError = waitForRavenProviderError(sessionId)
+            const firstProgress = waitForRavenFirstProgress(sessionId, Math.min(timeout, 30_000))
             try {
-              savedCandidate = await countRavenSavedCandidateBytes(sessionId)
-            } catch { /* best-effort */ }
-            if (savedCandidate <= 0) {
-              for (const part of parts) {
-                if (part.args) savedCandidate += JSON.stringify(part.args).length
-                if (part.content) savedCandidate += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
-              }
-            }
-            const saved = Math.max(0, savedCandidate - output.length)
-            addBytes(saved)
+              const result = await Promise.race([
+                client.session.prompt({
+                  path: { id: sessionId },
+                  body: {
+                    agent: "raven",
+                    parts: [{ type: "text", text: args.query }],
+                  },
+                }),
+                providerError,
+                firstProgress,
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error(`Raven timed out after ${timeout / 1000}s — session kept: ${sessionId}`)), timeout)
+                }),
+              ])
+              if (timer) clearTimeout(timer)
+              clearRavenWaiters(sessionId)
 
-            return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*` }
+              const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+
+              // Extract text from the response
+              const parts = (result as any)?.data?.parts ?? []
+              const textParts = parts
+                .filter((p: any) => p.type === "text" && p.text)
+                .map((p: any) => p.text)
+              const output = textParts.join("\n") || "Raven returned no results."
+
+              // Context saved = Raven output/reasoning/cache context - compact answer returned to main session.
+              let savedCandidate = 0
+              try {
+                savedCandidate = await countRavenSavedCandidateBytes(sessionId)
+              } catch { /* best-effort */ }
+              if (savedCandidate <= 0) {
+                for (const part of parts) {
+                  if (part.args) savedCandidate += JSON.stringify(part.args).length
+                  if (part.content) savedCandidate += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
+                }
+              }
+              const saved = Math.max(0, savedCandidate - output.length)
+              addBytes(saved)
+              ravenProviderIssue = undefined
+
+              return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*` }
+            } finally {
+              if (timer) clearTimeout(timer)
+              clearRavenWaiters(sessionId)
+            }
           } catch (err: any) {
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
             const hint =
               /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
-              : /quota|usage.?limit|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota exhausted — proceed without search, tell user what's missing."
+              : /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota/subscription exhausted — proceed without Raven, tell the user Raven could not run, and mention what information may be missing."
+              : /auth|unauthorized|forbidden|401|403|api key|login/i.test(msg) ? "Raven provider authentication failed — proceed without Raven and tell the user to check the Raven model/provider login or API key."
               : /token|context.?length|too large|too long/i.test(msg) ? "Raven query too large — shorten your query and retry."
               : /model|unavailable|down|not found/i.test(msg) ? "Raven model unavailable — retry later, or proceed without search."
+              : /did not produce an initial response|retry dialog/i.test(msg) ? err.message
               : /timeout|timed.?out|session kept/i.test(msg) ? err.message
               : `Raven search failed. Proceed without search — note gaps for the user. [${err.message || err}]`
-            return { title: "Raven Seek", output: `${hint}\n\n*Attempt took ${elapsed}s*` }
+            if (/quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|auth|unauthorized|forbidden|401|403|api key|login|model|unavailable|down|not found|did not produce an initial response|retry dialog/i.test(msg)) {
+              ravenProviderIssue = hint
+            }
+            const recovery = ravenProviderIssue ? `\n\n${ravenRecoveryInstructions()}` : ""
+            return { title: "Raven Seek", output: `${hint}${recovery}\n\n*Attempt took ${elapsed}s*` }
           }
         },
       }),
@@ -1332,7 +1416,7 @@ export default ((input: PluginInput) => {
           }
 
           const operation = args.operation as RavenMcpOperation
-          const timeout = (config.timeout ?? 180) * 1000
+          const timeout = (config.timeout ?? 600) * 1000
           let connected = false
           try {
             const connection = await getMcpConnection(context.sessionID, args.server)
@@ -1414,6 +1498,37 @@ export default ((input: PluginInput) => {
       const evt = input.event
       if (evt?.type === "session.created" && evt?.properties?.parentID) {
         ravenSessionParents.set(evt.properties.parentID, evt.properties.id)
+      }
+      if (evt?.type === "message.updated") {
+        const info = evt.properties?.info
+        if (info?.role === "assistant" && info?.sessionID && info.error && ravenSessions.has(info.sessionID)) {
+          reportRavenProviderError(info.sessionID, info.error)
+        }
+      }
+      if (evt?.type === "message.part.updated") {
+        const part = evt.properties?.part
+        if (part?.sessionID && ravenSessions.has(part.sessionID)) {
+          if (part.type === "retry" && part.error) {
+            reportRavenProviderError(part.sessionID, part.error)
+          } else {
+            reportRavenProgress(part.sessionID)
+          }
+        }
+      }
+      if (evt?.type === "session.status") {
+        const sessionId = evt.properties?.sessionID
+        const status = evt.properties?.status
+        if (sessionId && ravenSessions.has(sessionId)) {
+          if (status?.type === "retry") {
+            reportRavenProviderError(sessionId, { name: "RetryError", data: { message: status.message } })
+          }
+        }
+      }
+      if (evt?.type === "session.error") {
+        const sessionId = evt.properties?.sessionID
+        if (sessionId && evt.properties?.error && ravenSessions.has(sessionId)) {
+          reportRavenProviderError(sessionId, evt.properties.error)
+        }
       }
 
       if (updateToastPending) {
@@ -1515,6 +1630,7 @@ export default ((input: PluginInput) => {
         } else {
           config.model = model
           saveConfig(config)
+          ravenProviderIssue = undefined
           output.parts.push({ type: "text", text: `Raven model set to: ${model}\nRestart opencode for the change to take effect.` })
         }
       } else if (arg.startsWith("effort ")) {
@@ -1529,7 +1645,7 @@ export default ((input: PluginInput) => {
       } else if (arg.startsWith("timeout ")) {
         const secs = parseInt(raw.slice(8).trim(), 10)
         if (!secs || secs < 10) {
-          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be at least 10. Current: ${config.timeout ?? 180}s` })
+          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be at least 10. Current: ${config.timeout ?? 600}s` })
         } else {
           config.timeout = secs
           saveConfig(config)
@@ -1539,7 +1655,8 @@ export default ((input: PluginInput) => {
         const enabled = config.enabled ? "enabled" : "disabled"
         const model = config.model || fm.model || "(default)"
         const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
-        const timeout = config.timeout ?? 180
+        const timeout = config.timeout ?? 600
+        const providerIssue = ravenProviderIssue ? `\nProvider issue: ${ravenProviderIssue}` : ""
         let update = "Update: unable to check npm."
         try {
           const info = await getUpdateInfo()
@@ -1547,7 +1664,7 @@ export default ((input: PluginInput) => {
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
             : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
+        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s${providerIssue}\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
       }
     },
 
