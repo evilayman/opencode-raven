@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.3
+
+### Changed
+- **Default timeout** — Raven's default timeout is now 600s.
+
 ## 2.1.2
 
 ### Fixed
@@ -109,7 +114,7 @@
 ## 1.2.3
 
 ### Added
-- **`raven_seek` timeout** — configurable timeout (default 180s). Session kept alive on timeout for inspection. `/raven timeout <seconds>` command.
+- **`raven_seek` timeout** — configurable timeout (default 600s). Session kept alive on timeout for inspection. `/raven timeout <seconds>` command.
 - **Session debugger** — `scripts/debug-raven.ts` auto-detects the latest session and shows tool calls, timing, status, and errors.
 
 ### Changed

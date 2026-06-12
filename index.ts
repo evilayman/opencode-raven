@@ -203,7 +203,7 @@ const DEFAULT_CONFIG: RavenConfig = {
   onDemandMcpServers: DEFAULT_ON_DEMAND_MCP_SERVERS,
   excludeAgents: [],
   excludeTools: [],
-  timeout: 180,
+  timeout: 600,
 }
 
 function parseRavenMd(raw: string): { frontmatter: Record<string, any>; prompt: string } {

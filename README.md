@@ -188,7 +188,7 @@ Edit config manually or use `/raven` commands:
   },
   "excludeAgents": [],
   "excludeTools": [],
-  "timeout": 180
+  "timeout": 600
 }
 ```
 
@@ -204,7 +204,7 @@ Edit config manually or use `/raven` commands:
 | `onDemandMcpServers` | Context7, Exa, Grep.app | MCPs Raven connects to internally on demand, without registering full schemas in OpenCode global MCP config. Supports OpenCode-style `remote` and `local` entries. Each server supports `enabled`, defaulting to `true`. |
 | `excludeAgents` | `[]` | Agents that bypass Raven routing, case-insensitive. |
 | `excludeTools` | `[]` | Exact tools that never get blocked, even if matched by auto-routed global MCP prefixes. |
-| `timeout` | `180` | Max seconds for a `raven_seek` call. On timeout the session is kept for inspection. |
+| `timeout` | `600` | Max seconds for a `raven_seek` call. On timeout the session is kept for inspection. |
 | `stats` | auto | Session and global estimated context saved by Raven. Managed automatically. |
 
 Use `ravenInstructions` for extra Raven-only guidance, such as how to use custom MCPs:
