@@ -531,13 +531,6 @@ export default ((input: PluginInput) => {
     return config.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
-  function ravenGuidance(): string {
-    const tools = config.routeTools?.length ? config.routeTools.join(", ") : "none"
-    const mcps = globalMcpServers.length ? globalMcpServers.map((server) => `${server}_*`).join(", ") : "none"
-    const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "none"
-    return `Some tools/MCPs are routed through Raven to save context. Routed tools: ${tools}. Auto-routed global MCP prefixes: ${mcps}. Routed tool-name keywords: ${keywords}. ${onDemandMcpGuidance("delegate")} If one is blocked, your next tool call should be raven_seek(query="<same request>"). Include the original tool/MCP name and relevant arguments.`
-  }
-
   function isRouteConfigured(toolName: string): boolean {
     const tool = toolName.toLowerCase()
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
@@ -1682,18 +1675,8 @@ Then restart opencode for the model change to take effect. If the task can be co
       if (isExcluded(sessionAgents.get(input.sessionID))) return
       if (config.excludeTools?.some((name) => name.toLowerCase() === input.tool.toLowerCase())) return
 
-      // ── Subagent prompt injection: inject Raven guidance into every subagent ──
-      if ((input.tool === "task" || input.tool === "subtask") && output.args) {
-        const subagentType = input.tool === "task" ? (output.args.subagent_type ?? "") : ""
-        if (subagentType === "raven") {
-          ravenTaskCalls.add(input.callID)
-        }
-        if (subagentType !== "raven" && !isExcluded(subagentType)) {
-          const field = ["prompt", "description", "request", "objective", "query"].find(
-            (f) => f in output.args
-          ) ?? "prompt"
-          output.args[field] = `${output.args[field] ?? ""}\n\n<raven_guidance>\n${ravenGuidance()}\n</raven_guidance>`
-        }
+      if (input.tool === "task" && output.args?.subagent_type === "raven") {
+        ravenTaskCalls.add(input.callID)
       }
 
       // ── Block routed tools/MCPs for non-Raven agents ──

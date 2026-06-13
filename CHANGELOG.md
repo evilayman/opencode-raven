@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.4
+
+### Changed
+- **Subagent prompts** — Raven no longer injects routing guidance into subagent prompts; global instructions and tool enforcement handle routing.
+
 ## 2.1.3
 
 ### Changed

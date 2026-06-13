@@ -285,10 +285,10 @@ MCPs configured directly in OpenCode `opencode.jsonc` still load globally and ma
 | `chat.message` | Tracks agent to session mapping for allowlist and Raven exclusion. |
 | `event` | Shows startup update and MCP failure notifications after the TUI event stream is ready. |
 | `command.execute.before` | Handles `/raven help`, routing commands, MCP commands, update checks, model settings, timeout, and stats. |
-| `tool.execute.before` | Hard-blocks configured tools/MCPs for non-Raven, non-excluded agents. Error output gives the next `raven_seek(query="...")` call. Injects dynamic `<raven_guidance>` with configured routes into subagent prompts. |
+| `tool.execute.before` | Hard-blocks configured tools/MCPs for non-Raven, non-excluded agents. Error output gives the next `raven_seek(query="...")` call or recovery instructions if Raven's provider is unavailable. Tracks direct Raven subagent calls for stats. |
 | `tool.execute.after` | Tracks direct `@Raven` calls for context-saved stats. |
 
-Every non-Raven, non-excluded subagent gets `<raven_guidance>` injected into its prompt at spawn time. The injected guidance includes `routeTools`, auto-detected global MCP prefixes, `routeToolKeywords`, and on-demand MCP capabilities.
+Raven routing guidance is loaded through OpenCode instructions at startup. Subagent prompts are not modified; if a non-Raven agent calls a routed tool, Raven blocks it and returns the exact `raven_seek(query="...")` call to use.
 
 ## Agent Capabilities
 

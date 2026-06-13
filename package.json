@@ -1,6 +1,6 @@
 {
   "name": "opencode-raven",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "Ready-to-use search tools and optional on-demand MCPs for OpenCode, routed through Raven to save your main model's context and cost.",
   "main": "./index.ts",
   "exports": {
