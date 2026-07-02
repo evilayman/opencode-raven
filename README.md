@@ -1,5 +1,9 @@
 # opencode-raven
 
+[![npm version](https://img.shields.io/npm/v/opencode-raven.svg)](https://www.npmjs.com/package/opencode-raven)
+[![npm downloads](https://img.shields.io/npm/dm/opencode-raven.svg)](https://www.npmjs.com/package/opencode-raven)
+[![license](https://img.shields.io/npm/l/opencode-raven.svg)](LICENSE)
+
 <table>
 <tr>
 <td width="40%"><img src="Raven.png" alt="Raven" width="100%" /></td>
@@ -308,6 +312,6 @@ Raven itself has access to these tools, blocked for other agents when configured
 
 Raven returns compact findings: answer, sources, relevant details, recommended next step, and uncertainty.
 
-## License
+## Disclaimer
 
-MIT
+opencode-raven is not built by the OpenCode team and is not affiliated with OpenCode in any way.
