@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, rmSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { homedir, tmpdir } from "node:os"
 
@@ -63,6 +63,8 @@ const DEFAULT_ON_DEMAND_MCP_METADATA: Record<string, OnDemandMcpMetadata> = {
 }
 
 const NEVER_ROUTE_TOOLS = new Set(["raven_seek", "raven_mcp", "task", "subtask"])
+const MAX_TIMER_MS = 2_147_483_647
+const MAX_TIMEOUT_SECONDS = Math.floor(MAX_TIMER_MS / 1000)
 
 // ── Bash commands that look like search workarounds ──
 const SEARCH_BASH_RE = /\b(?:rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String)\b|\b(?:Get-ChildItem|gci)\b(?=[^|;&\n]*(?:-Recurse|-Filter|-Include|\s-[A-Za-z]*r[A-Za-z]*\b))|\bdir\b(?=[^|;&\n]*(?:[/-][sS]\b|-Recurse|-Filter|-Include))|\bls\b(?=[^|;&\n]*(?:\s-[A-Za-z]*R[A-Za-z]*\b|--recursive\b))|\bfind\b\s+.*(?:-name|-type)\b/i
@@ -83,6 +85,44 @@ function stripQuotedContent(cmd: string): string {
   return stripShellComments(stripHeredocs(cmd)
     .replace(/'[^']*'/g, "''")
     .replace(/"[^"]*"/g, '""'))
+}
+
+function unquoteShellPayload(value: string): string {
+  const payload = value.trim()
+  const quote = payload[0]
+  return (quote === '"' || quote === "'") && payload.endsWith(quote)
+    ? payload.slice(1, -1)
+    : payload
+}
+
+function wrappedShellPayload(cmd: string): string | undefined {
+  const command = stripShellComments(stripHeredocs(cmd)).trim()
+  const match = command.match(/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s+([\s\S]+))?$/)
+  if (!match) return undefined
+
+  const executable = (match[1] ?? match[2] ?? match[3]).replace(/\\/g, "/").split("/").pop()?.toLowerCase()
+  const rest = match[4] ?? ""
+  if (executable === "cmd" || executable === "cmd.exe") {
+    const payload = rest.match(/^(?:\/[dqs]\s+)*\/c\s+([\s\S]+)$/i)?.[1]
+    return payload === undefined ? undefined : unquoteShellPayload(payload)
+  }
+
+  if (["sh", "sh.exe", "bash", "bash.exe", "zsh", "zsh.exe", "dash", "dash.exe"].includes(executable ?? "")) {
+    const payload = rest.match(/^-[a-z]*c\s+([\s\S]+)$/i)?.[1]
+    return payload === undefined ? undefined : unquoteShellPayload(payload)
+  }
+
+  if (["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(executable ?? "")) {
+    const payload = rest.match(/(?:^|\s)-(?:command|c)\s+([\s\S]+)$/i)?.[1]
+    if (payload === undefined) return undefined
+    const unquoted = unquoteShellPayload(payload)
+    return unquoted.replace(
+      /(^|(?:(?:&&|\|\||[;|\n{(])\s*))&\s+(?:"([^"]+)"|'([^']+)'|(\S+))/g,
+      (_match, prefix, doubleQuoted, singleQuoted, bare) => `${prefix}${doubleQuoted ?? singleQuoted ?? bare}`,
+    )
+  }
+
+  return undefined
 }
 
 function splitPipelineSegments(cmd: string): string[] {
@@ -113,11 +153,15 @@ function hasSearchAfterCommandSeparator(segment: string): boolean {
 }
 
 function commandLooksLikeSearch(cmd: string): boolean {
-  const lower = cmd.toLowerCase().trim()
+  const wrapped = wrappedShellPayload(cmd)
+  if (wrapped !== undefined) return commandLooksLikeSearch(wrapped)
+
+  const stripped = stripQuotedContent(cmd)
+  const lower = stripped.toLowerCase().trim()
   if (/^cmd\s+\/c\s+"?(?:findstr|find|tree)\b/.test(lower)) return true
   if (/^cmd\s+\/c\s+"?dir\b[^\n]*\s\/s\b/.test(lower)) return true
 
-  return splitPipelineSegments(cmd).some((segment, index) => {
+  return splitPipelineSegments(stripped).some((segment, index) => {
     // Allow bounded filters over output already produced by the previous command:
     //   pacman -Qi libarchive | head -15
     //   7z i | grep -i udf
@@ -129,9 +173,7 @@ function commandLooksLikeSearch(cmd: string): boolean {
 
 function isSearchBash(tool: string, args: any): boolean {
   if (tool !== "bash") return false
-  const raw = String(args?.command ?? "")
-  const cmd = stripQuotedContent(raw)
-  return commandLooksLikeSearch(cmd)
+  return commandLooksLikeSearch(String(args?.command ?? ""))
 }
 
 // ── Config file shape ──
@@ -159,7 +201,6 @@ interface RemoteOnDemandMcpServer extends BaseOnDemandMcpServer {
   type: "remote"
   url: string
   headers?: Record<string, string>
-  oauth?: Record<string, unknown> | false
 }
 
 interface LocalOnDemandMcpServer extends BaseOnDemandMcpServer {
@@ -319,13 +360,15 @@ function normalizeOnDemandMcpServer(value: unknown): OnDemandMcpServer | undefin
   const source = value as Record<string, any>
   const base = {
     enabled: source.enabled !== false,
-    ...(typeof source.timeout === "number" && source.timeout > 0 ? { timeout: Math.floor(source.timeout) } : {}),
+    ...(typeof source.timeout === "number" && Number.isFinite(source.timeout) && source.timeout >= 1 && source.timeout <= MAX_TIMER_MS
+      ? { timeout: Math.floor(source.timeout) }
+      : {}),
     ...(typeof source.description === "string" && source.description.trim() ? { description: source.description.trim() } : {}),
   }
 
   if (source.type === "local") {
     const commandParts = Array.isArray(source.command)
-      ? source.command.filter((arg: unknown): arg is string => typeof arg === "string" && arg.trim())
+      ? source.command.filter((arg: unknown): arg is string => typeof arg === "string" && !!arg.trim())
       : []
     if (!commandParts.length) return undefined
     const environment = normalizeStringRecord(source.environment)
@@ -346,7 +389,6 @@ function normalizeOnDemandMcpServer(value: unknown): OnDemandMcpServer | undefin
       type: "remote",
       url: source.url.trim(),
       ...(headers ? { headers } : {}),
-      ...(source.oauth === false ? { oauth: false } : source.oauth && typeof source.oauth === "object" ? { oauth: source.oauth } : {}),
     }
   }
 
@@ -376,10 +418,6 @@ function normalizeOnDemandMcpMetadata(value: unknown, fallback: Record<string, O
   return result
 }
 
-function extractOnDemandMcpMetadata(value: unknown): Record<string, OnDemandMcpMetadata> {
-  return normalizeOnDemandMcpMetadata(value)
-}
-
 function normalizeOnDemandMcpServers(value: unknown, fallback: Record<string, OnDemandMcpServer> = {}): Record<string, OnDemandMcpServer> {
   const source = value && typeof value === "object" ? value as Record<string, unknown> : fallback
   const result: Record<string, OnDemandMcpServer> = {}
@@ -392,18 +430,15 @@ function normalizeOnDemandMcpServers(value: unknown, fallback: Record<string, On
 }
 
 // ── Plugin ──
-export default ((input: PluginInput) => {
+export default (async (input: PluginInput) => {
   const client = input.client
 
   // Raven state lives under the global opencode config directory.
   const opencodeConfigDir = join(homedir(), ".config", "opencode")
   const ravenConfigDir = join(opencodeConfigDir, "opencode-raven")
-  const oldConfigFile = join(opencodeConfigDir, "raven-config.json")
   const configFile = join(ravenConfigDir, "raven-config.json")
   const mcpMetadataFile = join(ravenConfigDir, "autogenerated-on-demand-mcp-metadata.json")
   const dynamicGuidanceFile = join(ravenConfigDir, "autogenerated-on-demand-guidance.md")
-  let migratedFromOldConfig = false
-  let initialMcpMetadata: Record<string, OnDemandMcpMetadata> = {}
 
   function normalizeConfig(raw: any): RavenConfig {
     const source = raw && typeof raw === "object" ? raw : {}
@@ -421,25 +456,25 @@ export default ((input: PluginInput) => {
       : normalizeOnDemandMcpServers(source.onDemandMcpServers)
     normalized.excludeAgents = uniqueStrings(source.excludeAgents)
     normalized.excludeTools = uniqueStrings(source.excludeTools)
-    normalized.timeout = typeof source.timeout === "number" ? source.timeout : DEFAULT_CONFIG.timeout
-    normalized.stats = source.stats || undefined
+    normalized.timeout = typeof source.timeout === "number" && Number.isFinite(source.timeout)
+      && source.timeout >= 10 && source.timeout <= MAX_TIMEOUT_SECONDS
+      ? Math.floor(source.timeout)
+      : DEFAULT_CONFIG.timeout
+    normalized.stats = source.stats && typeof source.stats === "object"
+      && typeof source.stats.bytes === "number" && Number.isFinite(source.stats.bytes) && source.stats.bytes >= 0
+      ? { bytes: Math.round(source.stats.bytes) }
+      : undefined
 
     return normalized
   }
 
   function loadConfig(): RavenConfig {
     try {
-      const sourceFile = existsSync(configFile) ? configFile : existsSync(oldConfigFile) ? oldConfigFile : undefined
-      if (sourceFile) {
-        const raw = JSON.parse(readFileSync(sourceFile, "utf-8"))
-        migratedFromOldConfig = sourceFile === oldConfigFile
-        initialMcpMetadata = extractOnDemandMcpMetadata(raw.onDemandMcpServers)
+      if (existsSync(configFile)) {
+        const raw = JSON.parse(readFileSync(configFile, "utf-8"))
         const normalized = normalizeConfig(raw)
-        if (migratedFromOldConfig || JSON.stringify(raw) !== JSON.stringify(normalized)) {
+        if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
           saveConfig(normalized)
-        }
-        if (migratedFromOldConfig) {
-          try { rmSync(oldConfigFile, { force: true }) } catch { /* best-effort */ }
         }
         return normalized
       }
@@ -456,16 +491,15 @@ export default ((input: PluginInput) => {
     } catch { /* non-fatal: config won't persist but toggle still works in-session */ }
   }
 
-  function loadMcpMetadata(seed: Record<string, OnDemandMcpMetadata>): Record<string, OnDemandMcpMetadata> {
+  function loadMcpMetadata(): Record<string, OnDemandMcpMetadata> {
     const defaults = cloneOnDemandMcpMetadata(DEFAULT_ON_DEMAND_MCP_METADATA)
     try {
       if (existsSync(mcpMetadataFile)) {
         return { ...defaults, ...normalizeOnDemandMcpMetadata(JSON.parse(readFileSync(mcpMetadataFile, "utf-8"))) }
       }
-    } catch { /* ignore corruption, use defaults + seed */ }
-    const metadata = { ...defaults, ...seed }
-    saveMcpMetadata(metadata)
-    return metadata
+    } catch { /* ignore corruption, use defaults */ }
+    saveMcpMetadata(defaults)
+    return defaults
   }
 
   function saveMcpMetadata(metadata: Record<string, OnDemandMcpMetadata>) {
@@ -482,14 +516,8 @@ export default ((input: PluginInput) => {
     } catch { /* non-fatal: guidance still exists in tool/subagent paths */ }
   }
 
-  function cleanupOldRootFiles() {
-    try {
-      if (existsSync(configFile)) rmSync(oldConfigFile, { force: true })
-    } catch { /* best-effort migration cleanup */ }
-  }
-
   let config = loadConfig()
-  let mcpMetadata = loadMcpMetadata(initialMcpMetadata)
+  let mcpMetadata = loadMcpMetadata()
   const ravenSessions = new Set<string>()
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
@@ -505,6 +533,8 @@ export default ((input: PluginInput) => {
   let duplicateMcpToastPending = false
   let mcpRefreshScheduled = false
   let mcpRefreshPromise: Promise<{ refreshed: string[]; failed: string[] }> | undefined
+  let mcpRefreshQueue: Promise<unknown> = Promise.resolve()
+  const mcpRefreshControllers = new Set<AbortController>()
   let lastNotifiedMcpFailureKey = ""
   let ravenProviderIssue: string | undefined
 
@@ -648,10 +678,6 @@ Then restart opencode for the model change to take effect. If the task can be co
     return [...existing, ...added]
   }
 
-  function fullGuidanceText(value: unknown): string {
-    return compactText(value)
-  }
-
   function firstSentenceText(value: unknown): string {
     const text = compactText(value)
     const period = text.indexOf(".")
@@ -662,7 +688,9 @@ Then restart opencode for the model change to take effect. If the task can be co
     const servers = config.onDemandMcpServers ?? {}
     const activeEntries = activeOnDemandMcpEntries()
     const entries = orderedOnDemandMcpEntries(
-      activeEntries.filter(([name]) => onDemandMcpRuntimeStatus(name) === "ready"),
+      target === "raven"
+        ? activeEntries
+        : activeEntries.filter(([name]) => onDemandMcpRuntimeStatus(name) === "ready"),
       preferredOrder,
     )
     if (!Object.keys(servers).length) return "No on-demand MCPs are configured."
@@ -713,20 +741,6 @@ Then restart opencode for the model change to take effect. If the task can be co
     return result
   }
 
-  async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
-        }),
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
-  }
-
   function providerErrorMessage(error: any): string {
     const name = String(error?.name ?? "")
     const data = error?.data && typeof error.data === "object" ? error.data : {}
@@ -773,37 +787,110 @@ Then restart opencode for the model change to take effect. If the task can be co
   type McpConnection = {
     client: Client
     transport: any
-    serverName: string
     lastUsed: number
+    active: number
+  }
+
+  type McpConnectionAttempt = {
+    promise: Promise<McpConnection>
+    controller: AbortController
+    waiters: number
   }
 
   const mcpConnections = new Map<string, McpConnection>()
+  const mcpConnectionAttempts = new Map<string, McpConnectionAttempt>()
+  let mcpIdleTimer: ReturnType<typeof setInterval> | undefined
 
-  async function closeMcpConnection(connection: McpConnection) {
+  function mcpTimeoutMs(server: OnDemandMcpServer): number {
+    return server.timeout ?? (config.timeout ?? 600) * 1000
+  }
+
+  async function closeMcpClient(client: Client, transport: any) {
     try {
-      if (typeof connection.transport?.terminateSession === "function") {
-        await connection.transport.terminateSession()
-      }
+      await transport?.close?.()
     } catch { /* best-effort */ }
     try {
-      await connection.client.close()
+      await client.close()
     } catch { /* best-effort */ }
   }
 
-  async function closeMcpConnectionKey(key: string) {
+  async function connectMcpClient(client: Client, transport: any, timeout: number, label: string, signal?: AbortSignal) {
+    const controller = new AbortController()
+    let timedOut = false
+    const abort = () => controller.abort(signal?.reason)
+    if (signal?.aborted) abort()
+    else signal?.addEventListener("abort", abort, { once: true })
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, timeout)
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const fail = () => reject(new Error(timedOut ? `${label} timed out after ${Math.round(timeout / 1000)}s` : `${label} cancelled`))
+      if (controller.signal.aborted) fail()
+      else controller.signal.addEventListener("abort", fail, { once: true })
+    })
+
+    try {
+      await Promise.race([
+        client.connect(transport, { signal: controller.signal, timeout }),
+        aborted,
+      ])
+    } catch (error) {
+      await closeMcpClient(client, transport)
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", abort)
+    }
+  }
+
+  async function closeMcpConnection(connection: McpConnection) {
+    await closeMcpClient(connection.client, connection.transport)
+  }
+
+  function stopMcpIdleTimerIfUnused() {
+    if (mcpConnections.size || mcpConnectionAttempts.size || !mcpIdleTimer) return
+    clearInterval(mcpIdleTimer)
+    mcpIdleTimer = undefined
+  }
+
+  function ensureMcpIdleTimer() {
+    if (mcpIdleTimer) return
+    mcpIdleTimer = setInterval(() => closeIdleMcpConnections(), 60_000)
+    ;(mcpIdleTimer as any).unref?.()
+  }
+
+  async function closeMcpConnectionKey(key: string, expected?: McpConnection) {
     const existing = mcpConnections.get(key)
-    if (!existing) return
+    if (!existing || (expected && existing !== expected)) return
     mcpConnections.delete(key)
     await closeMcpConnection(existing)
+    stopMcpIdleTimerIfUnused()
   }
 
   function closeIdleMcpConnections(maxAgeMs = 10 * 60 * 1000) {
     const now = Date.now()
     for (const [key, connection] of mcpConnections) {
-      if (now - connection.lastUsed > maxAgeMs) {
-        void closeMcpConnectionKey(key)
+      if (!connection.active && now - connection.lastUsed > maxAgeMs) {
+        void closeMcpConnectionKey(key, connection)
       }
     }
+  }
+
+  async function closeMcpConnectionsForSession(sessionId: string) {
+    const prefix = `${sessionId}:`
+    const pending: Promise<McpConnection>[] = []
+    for (const [key, attempt] of mcpConnectionAttempts) {
+      if (!key.startsWith(prefix)) continue
+      attempt.controller.abort()
+      pending.push(attempt.promise)
+    }
+    await Promise.allSettled(pending)
+    await Promise.all(
+      [...mcpConnections.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .map((key) => closeMcpConnectionKey(key)),
+    )
   }
 
   function mcpConnectionKey(sessionId: string, serverName: string): string {
@@ -819,8 +906,37 @@ Then restart opencode for the model change to take effect. If the task can be co
     return Object.entries(config.onDemandMcpServers ?? {}).filter(([, server]) => server.enabled !== false)
   }
 
-  async function connectOnDemandMcp(serverName: string, server: OnDemandMcpServer): Promise<McpConnection> {
-    const timeout = server.timeout ?? (config.timeout ?? 180) * 1000
+  function waitForMcpConnection(attempt: McpConnectionAttempt, signal?: AbortSignal): Promise<McpConnection> {
+    if (!signal) {
+      attempt.waiters++
+      return attempt.promise.finally(() => attempt.waiters--)
+    }
+    if (signal.aborted) return Promise.reject(new Error("MCP request cancelled"))
+    attempt.waiters++
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return false
+        settled = true
+        attempt.waiters--
+        signal.removeEventListener("abort", abort)
+        return true
+      }
+      const abort = () => {
+        if (!finish()) return
+        if (!attempt.waiters) attempt.controller.abort(signal.reason)
+        reject(new Error("MCP request cancelled"))
+      }
+      signal.addEventListener("abort", abort, { once: true })
+      attempt.promise.then(
+        (connection) => { if (finish()) resolve(connection) },
+        (error) => { if (finish()) reject(error) },
+      )
+    })
+  }
+
+  async function connectOnDemandMcp(serverName: string, server: OnDemandMcpServer, signal?: AbortSignal): Promise<McpConnection> {
+    const timeout = mcpTimeoutMs(server)
     const client = new Client({ name: PACKAGE_NAME, version: PACKAGE_VERSION })
 
     if (server.type === "local") {
@@ -834,26 +950,31 @@ Then restart opencode for the model change to take effect. If the task can be co
       })
       transport.stderr?.on("data", () => {})
       transport.stderr?.on("error", () => {})
-      await withTimeout(client.connect(transport), timeout, `Connecting to ${serverName}`)
-      return { client, transport, serverName, lastUsed: Date.now() }
+      await connectMcpClient(client, transport, timeout, `Connecting to ${serverName}`, signal)
+      return { client, transport, lastUsed: Date.now(), active: 0 }
     }
 
     const url = new URL(resolveEnvPlaceholders(server.url))
     const headers = resolveStringRecord(server.headers)
+    const transport = new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined)
     try {
-      const transport = new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined)
-      await withTimeout(client.connect(transport), timeout, `Connecting to ${serverName}`)
-      return { client, transport, serverName, lastUsed: Date.now() }
+      await connectMcpClient(client, transport, timeout, `Connecting to ${serverName}`, signal)
+      return { client, transport, lastUsed: Date.now(), active: 0 }
     } catch (err) {
-      try { await client.close() } catch { /* best-effort */ }
+      if (signal?.aborted) throw err
       const fallbackClient = new Client({ name: PACKAGE_NAME, version: PACKAGE_VERSION })
       const fallback = new SSEClientTransport(url, headers ? { requestInit: { headers } } : undefined)
-      await withTimeout(fallbackClient.connect(fallback), timeout, `Connecting to ${serverName} via SSE`)
-      return { client: fallbackClient, transport: fallback, serverName, lastUsed: Date.now() }
+      try {
+        await connectMcpClient(fallbackClient, fallback, timeout, `Connecting to ${serverName} via SSE`, signal)
+        return { client: fallbackClient, transport: fallback, lastUsed: Date.now(), active: 0 }
+      } catch (fallbackError) {
+        throw fallbackError
+      }
     }
   }
 
-  async function getMcpConnection(sessionId: string, serverName: string): Promise<McpConnection> {
+  async function getMcpConnection(sessionId: string, serverName: string, signal?: AbortSignal): Promise<McpConnection> {
+    if (signal?.aborted) throw new Error("MCP request cancelled")
     closeIdleMcpConnections()
     const match = getOnDemandMcpServer(serverName)
     if (!match) throw new Error(`Unknown on-demand MCP server: ${serverName}`)
@@ -864,38 +985,63 @@ Then restart opencode for the model change to take effect. If the task can be co
       existing.lastUsed = Date.now()
       return existing
     }
-    const connection = await connectOnDemandMcp(canonicalName, server)
-    mcpConnections.set(key, connection)
-    return connection
+
+    const pending = mcpConnectionAttempts.get(key)
+    if (pending && !pending.controller.signal.aborted) return waitForMcpConnection(pending, signal)
+    if (pending) mcpConnectionAttempts.delete(key)
+
+    const controller = new AbortController()
+    const attempt = { controller, waiters: 0 } as McpConnectionAttempt
+    attempt.promise = connectOnDemandMcp(canonicalName, server, controller.signal)
+      .then(async (connection) => {
+        if (controller.signal.aborted || mcpConnectionAttempts.get(key) !== attempt) {
+          await closeMcpConnection(connection)
+          throw new Error("MCP connection attempt cancelled")
+        }
+        mcpConnections.set(key, connection)
+        connection.client.onclose = () => {
+          if (mcpConnections.get(key) === connection) mcpConnections.delete(key)
+          stopMcpIdleTimerIfUnused()
+        }
+        ensureMcpIdleTimer()
+        return connection
+      })
+      .finally(() => {
+        if (mcpConnectionAttempts.get(key) === attempt) mcpConnectionAttempts.delete(key)
+        stopMcpIdleTimerIfUnused()
+      })
+    mcpConnectionAttempts.set(key, attempt)
+    ensureMcpIdleTimer()
+    return waitForMcpConnection(attempt, signal)
   }
 
-  async function listAllMcpTools(client: Client): Promise<any[]> {
+  async function listAllMcpTools(client: Client, options?: { signal?: AbortSignal; timeout?: number }): Promise<any[]> {
     const tools: any[] = []
     let cursor: string | undefined
     do {
-      const result: any = await client.listTools(cursor ? { cursor } : undefined as any)
+      const result: any = await client.listTools(cursor ? { cursor } : undefined as any, options)
       tools.push(...(result.tools ?? []))
       cursor = result.nextCursor
     } while (cursor)
     return tools
   }
 
-  async function listAllMcpResources(client: Client): Promise<any[]> {
+  async function listAllMcpResources(client: Client, options?: { signal?: AbortSignal; timeout?: number }): Promise<any[]> {
     const resources: any[] = []
     let cursor: string | undefined
     do {
-      const result: any = await client.listResources(cursor ? { cursor } : undefined as any)
+      const result: any = await client.listResources(cursor ? { cursor } : undefined as any, options)
       resources.push(...(result.resources ?? []))
       cursor = result.nextCursor
     } while (cursor)
     return resources
   }
 
-  async function listAllMcpPrompts(client: Client): Promise<any[]> {
+  async function listAllMcpPrompts(client: Client, options?: { signal?: AbortSignal; timeout?: number }): Promise<any[]> {
     const prompts: any[] = []
     let cursor: string | undefined
     do {
-      const result: any = await client.listPrompts(cursor ? { cursor } : undefined as any)
+      const result: any = await client.listPrompts(cursor ? { cursor } : undefined as any, options)
       prompts.push(...(result.prompts ?? []))
       cursor = result.nextCursor
     } while (cursor)
@@ -923,7 +1069,8 @@ Then restart opencode for the model change to take effect. If the task can be co
     return compactText(`${serverName} provides on-demand MCP tools for ${joined}.`)
   }
 
-  async function refreshOnDemandMcpDescriptions(force = false, serverName?: string): Promise<{ refreshed: string[]; failed: string[] }> {
+  async function refreshOnDemandMcpDescriptions(force = false, serverName?: string, signal?: AbortSignal): Promise<{ refreshed: string[]; failed: string[] }> {
+    if (signal?.aborted) return { refreshed: [], failed: [] }
     const entries = activeOnDemandMcpEntries()
       .filter(([name]) => !serverName || name.toLowerCase() === serverName.toLowerCase())
       .filter(([name]) => {
@@ -935,11 +1082,12 @@ Then restart opencode for the model change to take effect. If the task can be co
     if (!entries.length) return { refreshed, failed }
     let changed = false
     for (const [name, server] of entries) {
+      if (signal?.aborted) break
       let connection: McpConnection | undefined
       const checkedAt = new Date().toISOString()
       try {
-        connection = await connectOnDemandMcp(name, server)
-        const rawTools = await listAllMcpTools(connection.client)
+        connection = await connectOnDemandMcp(name, server, signal)
+        const rawTools = await listAllMcpTools(connection.client, { signal, timeout: mcpTimeoutMs(server) })
         const tools = generatedToolsFromMcpTools(rawTools)
         mcpMetadata[name] = {
           autoGeneratedTools: tools,
@@ -951,6 +1099,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         changed = true
         refreshed.push(name)
       } catch (err: any) {
+        if (signal?.aborted) break
         mcpMetadata[name] = {
           ...(mcpMetadata[name] ?? {}),
           status: "failed",
@@ -971,14 +1120,37 @@ Then restart opencode for the model change to take effect. If the task can be co
     return { refreshed, failed }
   }
 
-  function scheduleOnDemandMcpRefresh(): Promise<{ refreshed: string[]; failed: string[] }> {
-    if (mcpRefreshScheduled && mcpRefreshPromise) return mcpRefreshPromise
-    mcpRefreshScheduled = true
-    mcpRefreshPromise = new Promise((resolve) => {
-      setTimeout(() => {
-        void refreshOnDemandMcpDescriptions().then(resolve)
-      }, 1000)
+  function waitForRefreshDelay(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve()
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, ms)
+      function done() {
+        clearTimeout(timer)
+        signal.removeEventListener("abort", done)
+        resolve()
+      }
+      signal.addEventListener("abort", done, { once: true })
     })
+  }
+
+  function queueOnDemandMcpRefresh(force = false, serverName?: string, delay = 0): Promise<{ refreshed: string[]; failed: string[] }> {
+    const controller = new AbortController()
+    mcpRefreshControllers.add(controller)
+    const run = mcpRefreshQueue
+      .catch(() => undefined)
+      .then(async () => {
+        if (delay) await waitForRefreshDelay(delay, controller.signal)
+        return refreshOnDemandMcpDescriptions(force, serverName, controller.signal)
+      })
+      .finally(() => mcpRefreshControllers.delete(controller))
+    mcpRefreshQueue = run
+    return run
+  }
+
+  function scheduleOnDemandMcpRefresh(): Promise<{ refreshed: string[]; failed: string[] }> {
+    if (mcpRefreshScheduled) return mcpRefreshPromise!
+    mcpRefreshScheduled = true
+    mcpRefreshPromise = queueOnDemandMcpRefresh(false, undefined, 1000)
     return mcpRefreshPromise
   }
 
@@ -1246,7 +1418,10 @@ Then restart opencode for the model change to take effect. If the task can be co
   async function notifyIfMcpFailures(names?: string[]) {
     try {
       const failed = failedOnDemandMcpNames(names)
-      if (!failed.length) return
+      if (!failed.length) {
+        lastNotifiedMcpFailureKey = ""
+        return
+      }
       const key = failed.sort().join("|")
       if (key === lastNotifiedMcpFailureKey) return
       lastNotifiedMcpFailureKey = key
@@ -1278,7 +1453,21 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   return {
-    config(configInput: any) {
+    async dispose() {
+      for (const controller of mcpRefreshControllers) controller.abort()
+      for (const attempt of mcpConnectionAttempts.values()) attempt.controller.abort()
+      await Promise.allSettled([
+        ...[...mcpConnectionAttempts.values()].map((attempt) => attempt.promise),
+        mcpRefreshQueue,
+      ])
+      await Promise.all([...mcpConnections.keys()].map((key) => closeMcpConnectionKey(key)))
+      if (mcpIdleTimer) clearInterval(mcpIdleTimer)
+      mcpIdleTimer = undefined
+      for (const sessionId of ravenProgressWaiters.keys()) clearRavenWaiters(sessionId)
+      ravenErrorWaiters.clear()
+    },
+
+    async config(configInput: any) {
       globalMcpServers = uniqueStrings(Object.entries(configInput.mcp ?? {})
         .filter(([, value]) => !value || typeof value !== "object" || (value as any).enabled !== false)
         .map(([name]) => name))
@@ -1287,7 +1476,6 @@ Then restart opencode for the model change to take effect. If the task can be co
 
       // Inject MCP guidance as a startup instruction file (absolute path for npm compat).
       // The file is regenerated after MCP health checks, not during the startup pending reset.
-      cleanupOldRootFiles()
       configInput.instructions = configInput.instructions || []
       if (!configInput.instructions.includes(MCP_GUIDANCE_MD)) {
         configInput.instructions.push(MCP_GUIDANCE_MD)
@@ -1343,6 +1531,7 @@ Then restart opencode for the model change to take effect. If the task can be co
                 parentID: context.sessionID,
                 title: `raven_seek: ${args.query.slice(0, 80)}`,
               },
+              signal: context.abort,
             })
 
             const sessionId = (session as any)?.data?.id ?? (session as any)?.id
@@ -1352,21 +1541,25 @@ Then restart opencode for the model change to take effect. If the task can be co
 
             ravenSessions.add(sessionId)
 
-            // Emit sessionId so the TUI renders a clickable delegation box
+            // Preserve the child session link for TUI clients that render it.
             context.metadata({ metadata: { sessionId } })
 
             // Log session for debugging
             try {
               const logFile = join(tmpdir(), "raven-sessions.log")
               const ts = new Date().toISOString()
-              const q = String(args.query).slice(0, 100)
-              appendFileSync(logFile, `${ts} ${sessionId} "${q}"\n`)
+              writeFileSync(logFile, `${ts} ${sessionId}\n`)
             } catch { /* non-fatal */ }
 
             // Send the query to Raven with timeout. Provider/API errors are also
             // surfaced through message.updated events; fail as soon as one lands
             // so the caller does not wait for the full timeout on quota/auth issues.
             let timer: ReturnType<typeof setTimeout> | undefined
+            let promptCompleted = false
+            const promptController = new AbortController()
+            const abortPrompt = () => promptController.abort(context.abort.reason)
+            if (context.abort.aborted) abortPrompt()
+            else context.abort.addEventListener("abort", abortPrompt, { once: true })
             const providerError = waitForRavenProviderError(sessionId)
             const firstProgress = waitForRavenFirstProgress(sessionId, Math.min(timeout, 30_000))
             try {
@@ -1377,13 +1570,18 @@ Then restart opencode for the model change to take effect. If the task can be co
                     agent: "raven",
                     parts: [{ type: "text", text: args.query }],
                   },
+                  signal: promptController.signal,
                 }),
                 providerError,
                 firstProgress,
                 new Promise<never>((_, reject) => {
-                  timer = setTimeout(() => reject(new Error(`Raven timed out after ${timeout / 1000}s — session kept: ${sessionId}`)), timeout)
+                  timer = setTimeout(() => {
+                    promptController.abort()
+                    reject(new Error(`Raven timed out after ${timeout / 1000}s — child session retained: ${sessionId}`))
+                  }, timeout)
                 }),
               ])
+              promptCompleted = true
               if (timer) clearTimeout(timer)
               clearRavenWaiters(sessionId)
 
@@ -1413,6 +1611,8 @@ Then restart opencode for the model change to take effect. If the task can be co
 
               return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*` }
             } finally {
+              context.abort.removeEventListener("abort", abortPrompt)
+              if (!promptCompleted) promptController.abort()
               if (timer) clearTimeout(timer)
               clearRavenWaiters(sessionId)
             }
@@ -1420,7 +1620,8 @@ Then restart opencode for the model change to take effect. If the task can be co
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
             const hint =
-              /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
+              context.abort.aborted ? "Raven search cancelled."
+              : /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
               : /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota/subscription exhausted — proceed without Raven, tell the user Raven could not run, and mention what information may be missing."
               : /auth|unauthorized|forbidden|401|403|api key|login/i.test(msg) ? "Raven provider authentication failed — proceed without Raven and tell the user to check the Raven model/provider login or API key."
               : /token|context.?length|too large|too long/i.test(msg) ? "Raven query too large — shorten your query and retry."
@@ -1450,17 +1651,20 @@ Then restart opencode for the model change to take effect. If the task can be co
           }
 
           const operation = args.operation as RavenMcpOperation
-          const timeout = (config.timeout ?? 600) * 1000
+          const server = getOnDemandMcpServer(args.server)?.[1]
+          const timeout = server ? mcpTimeoutMs(server) : (config.timeout ?? 600) * 1000
+          const requestOptions = { signal: context.abort, timeout }
           let connected = false
+          let connection: McpConnection | undefined
           try {
-            const connection = await getMcpConnection(context.sessionID, args.server)
+            connection = await getMcpConnection(context.sessionID, args.server, context.abort)
             connected = true
-            setOnDemandMcpHealth(args.server, "ready")
+            connection.active++
             connection.lastUsed = Date.now()
             const client = connection.client
 
             if (operation === "list_tools") {
-              const tools = await withTimeout(listAllMcpTools(client), timeout, `Listing ${args.server} tools`)
+              const tools = await listAllMcpTools(client, requestOptions)
               const match = getOnDemandMcpServer(args.server)
               if (match) {
                 const [name] = match
@@ -1473,52 +1677,63 @@ Then restart opencode for the model change to take effect. If the task can be co
                   lastCheckedAt: new Date().toISOString(),
                 }
                 saveMcpMetadata(mcpMetadata)
+                saveDynamicGuidance()
               }
               return { title: `Raven MCP: ${args.server}`, output: formatMcpToolsForRaven(args.server, tools) }
             }
 
             if (operation === "call_tool") {
               if (!args.name) return { title: `Raven MCP: ${args.server}`, output: "call_tool requires name." }
-              const result = await withTimeout(client.callTool({ name: args.name, arguments: parseMcpArguments(args.argumentsJson) }), timeout, `Calling ${args.server}.${args.name}`)
+              const result = await client.callTool({ name: args.name, arguments: parseMcpArguments(args.argumentsJson) }, undefined, requestOptions)
+              setOnDemandMcpHealth(args.server, "ready")
               return { title: `Raven MCP: ${args.server}.${args.name}`, output: formatMcpResult(result) }
             }
 
             if (operation === "list_resources") {
-              const resources = await withTimeout(listAllMcpResources(client), timeout, `Listing ${args.server} resources`)
+              const resources = await listAllMcpResources(client, requestOptions)
+              setOnDemandMcpHealth(args.server, "ready")
               return { title: `Raven MCP: ${args.server}`, output: formatMcpList(`Resources for ${args.server}`, resources, ["uri", "name", "description"]) }
             }
 
             if (operation === "read_resource") {
               if (!args.name) return { title: `Raven MCP: ${args.server}`, output: "read_resource requires name as the resource URI." }
-              const result = await withTimeout(client.readResource({ uri: args.name }), timeout, `Reading ${args.server} resource`)
+              const result = await client.readResource({ uri: args.name }, requestOptions)
+              setOnDemandMcpHealth(args.server, "ready")
               return { title: `Raven MCP: ${args.server}`, output: formatMcpResult(result) }
             }
 
             if (operation === "list_prompts") {
-              const prompts = await withTimeout(listAllMcpPrompts(client), timeout, `Listing ${args.server} prompts`)
+              const prompts = await listAllMcpPrompts(client, requestOptions)
+              setOnDemandMcpHealth(args.server, "ready")
               return { title: `Raven MCP: ${args.server}`, output: formatMcpList(`Prompts for ${args.server}`, prompts) }
             }
 
             if (operation === "get_prompt") {
               if (!args.name) return { title: `Raven MCP: ${args.server}`, output: "get_prompt requires name." }
-              const result = await withTimeout(client.getPrompt({ name: args.name, arguments: parseMcpArguments(args.argumentsJson) }), timeout, `Getting ${args.server} prompt`)
+              const result = await client.getPrompt({ name: args.name, arguments: parseMcpArguments(args.argumentsJson) }, requestOptions)
+              setOnDemandMcpHealth(args.server, "ready")
               return { title: `Raven MCP: ${args.server}.${args.name}`, output: formatMcpResult(result) }
             }
 
             return { title: `Raven MCP: ${args.server}`, output: `Unsupported operation: ${operation}` }
           } catch (err: any) {
-            if (!connected) {
+            if (!connected && !context.abort.aborted) {
               const name = setOnDemandMcpHealth(args.server, "failed", err?.message ?? err)
               if (name) await notifyIfMcpFailures([name])
             }
             return { title: `Raven MCP: ${args.server}`, output: `MCP call failed: ${err?.message ?? err}` }
+          } finally {
+            if (connection) {
+              connection.active = Math.max(0, connection.active - 1)
+              connection.lastUsed = Date.now()
+            }
           }
         },
       }),
     },
 
     // Track agent ↔ session mapping for allowlist + Raven exclusion
-    "chat.message"(input: any, _output: any) {
+    async "chat.message"(input: any, _output: any) {
       if (input.agent) {
         sessionAgents.set(input.sessionID, input.agent)
         if (input.agent === "raven") {
@@ -1527,11 +1742,24 @@ Then restart opencode for the model change to take effect. If the task can be co
       }
     },
 
-    event(input: { event: any }) {
+    async event(input: { event: any }) {
       // Track subagent session → parent mapping for accurate context counting
       const evt = input.event
-      if (evt?.type === "session.created" && evt?.properties?.parentID) {
-        ravenSessionParents.set(evt.properties.parentID, evt.properties.id)
+      if (evt?.type === "session.created") {
+        const info = evt.properties?.info
+        if (info?.parentID && info?.id) ravenSessionParents.set(info.parentID, info.id)
+      }
+      if (evt?.type === "session.deleted") {
+        const sessionId = evt.properties?.info?.id
+        if (sessionId) {
+          ravenSessions.delete(sessionId)
+          sessionAgents.delete(sessionId)
+          clearRavenWaiters(sessionId)
+          for (const [parentId, childId] of ravenSessionParents) {
+            if (parentId === sessionId || childId === sessionId) ravenSessionParents.delete(parentId)
+          }
+          await closeMcpConnectionsForSession(sessionId)
+        }
       }
       if (evt?.type === "message.updated") {
         const info = evt.properties?.info
@@ -1625,7 +1853,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         const action = parts[1]?.toLowerCase()
         if (action === "refresh") {
           const serverName = parts.slice(2).join(" ").trim() || undefined
-          const result = await refreshOnDemandMcpDescriptions(true, serverName)
+          const result = await queueOnDemandMcpRefresh(true, serverName)
           await notifyIfMcpFailures(result.failed)
           output.parts.push({
             type: "text",
@@ -1677,9 +1905,9 @@ Then restart opencode for the model change to take effect. If the task can be co
           output.parts.push({ type: "text", text: `Raven reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
         }
       } else if (arg.startsWith("timeout ")) {
-        const secs = parseInt(raw.slice(8).trim(), 10)
-        if (!secs || secs < 10) {
-          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be at least 10. Current: ${config.timeout ?? 600}s` })
+        const secs = Number(raw.slice(8).trim())
+        if (!Number.isInteger(secs) || secs < 10 || secs > MAX_TIMEOUT_SECONDS) {
+          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be between 10 and ${MAX_TIMEOUT_SECONDS}. Current: ${config.timeout ?? 600}s` })
         } else {
           config.timeout = secs
           saveConfig(config)
@@ -1696,13 +1924,15 @@ Then restart opencode for the model change to take effect. If the task can be co
           const info = await getUpdateInfo()
           update = info.available && info.latest
             ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
-            : `Update: up to date${info.latest ? ` (latest ${info.latest})` : ""}.`
+            : info.latest
+              ? `Update: up to date (latest ${info.latest}).`
+              : "Update: unable to check npm."
         } catch { /* keep fallback */ }
         output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s${providerIssue}\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
       }
     },
 
-    "tool.execute.before"(input: any, output: any) {
+    async "tool.execute.before"(input: any, output: any) {
       if (input.tool === "raven_seek" && (ravenSessions.has(input.sessionID) || sessionAgents.get(input.sessionID) === "raven")) {
         throw new Error("raven_seek is disabled inside Raven. Use Raven's direct search/fetch tools instead.")
       }
@@ -1731,7 +1961,7 @@ Then restart opencode for the model change to take effect. If the task can be co
       }
     },
 
-    "tool.execute.after"(input: any, output: any) {
+    async "tool.execute.after"(input: any, output: any) {
       if (ravenTaskCalls.has(input.callID)) {
         ravenTaskCalls.delete(input.callID)
         // Try task metadata first (built-in tools preserve metadata)

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1.6
+
+### Added
+- Bun-based TypeScript verification and reproducible development dependencies.
+
+### Changed
+- On-demand MCP requests now propagate cancellation and SDK-native timeouts, reuse one in-flight connection per session/server, and close idle or deleted-session connections.
+- README structure and wording now focus on installation, usage, configuration, routing, security, and troubleshooting.
+- Removed legacy root-config and embedded MCP-metadata migration support.
+
+### Fixed
+- Quoted `cmd`, PowerShell, and Unix shell search commands can no longer bypass Raven routing.
+- Session event handling now follows the OpenCode SDK event shape.
+- Raven receives configured on-demand MCP guidance while startup health checks are pending.
+- Invalid timeout and stats values are normalized safely.
+
 ## 2.1.5
 
 ### Changed

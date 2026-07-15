@@ -1,16 +1,16 @@
 import { Database } from "bun:sqlite"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 
-const DB = "C:\\Users\\evila\\.local\\share\\opencode\\opencode.db"
+const DB = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "opencode", "opencode.db")
 const LOG = join(tmpdir(), "raven-sessions.log")
 
 // ── Resolve session ID ──
 const arg = Bun.argv[2]
 let SID: string | null = null
 
-if (arg && arg.startsWith("ses_")) {
+if (arg && /^ses_[A-Za-z0-9]+$/.test(arg)) {
   SID = arg
   console.log(`=== Manual session: ${SID} ===\n`)
 } else {
@@ -18,7 +18,7 @@ if (arg && arg.startsWith("ses_")) {
     const log = readFileSync(LOG, "utf-8")
     const lines = log.trim().split("\n")
     const last = lines[lines.length - 1]
-    const m = last.match(/ (ses_\w+) /)
+    const m = last.match(/ (ses_\w+)(?:\s|$)/)
     if (m) {
       SID = m[1]
       console.log(`=== Latest session: ${SID} ===\n`)
@@ -34,7 +34,7 @@ if (!SID) {
 const db = new Database(DB, { readonly: true })
 
 // ── Show parts (tool calls, reasoning, text) ──
-const parts = db.query(`SELECT * FROM part WHERE session_id = '${SID}' ORDER BY time_created`).all()
+const parts = db.query("SELECT * FROM part WHERE session_id = ? ORDER BY time_created").all(SID)
 console.log(`Parts: ${parts.length}\n`)
 
 for (const p of parts) {
@@ -66,7 +66,7 @@ for (const p of parts) {
 }
 
 // ── Show message summary ──
-const msgs = db.query(`SELECT * FROM message WHERE session_id = '${SID}' ORDER BY time_created`).all()
+const msgs = db.query("SELECT * FROM message WHERE session_id = ? ORDER BY time_created").all(SID)
 console.log(`\nMessages: ${msgs.length}`)
 for (const m of msgs) {
   const data = JSON.parse((m as any).data)
