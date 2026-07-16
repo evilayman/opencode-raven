@@ -469,22 +469,21 @@ export default (async (input: PluginInput) => {
   }
 
   function loadConfig(): RavenConfig {
-    try {
-      if (existsSync(configFile)) {
+    if (existsSync(configFile)) {
+      try {
         const raw = JSON.parse(readFileSync(configFile, "utf-8"))
-        const normalized = normalizeConfig(raw)
-        if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
-          saveConfig(normalized)
-        }
-        return normalized
+        return normalizeConfig(raw)
+      } catch {
+        // Preserve malformed or partially-written config so the user can repair it.
+        return { ...DEFAULT_CONFIG }
       }
-    } catch { /* ignore corruption, use defaults */ }
+    }
     // Auto-create config file with defaults on first run
-    saveConfig(DEFAULT_CONFIG)
+    writeConfig(DEFAULT_CONFIG)
     return { ...DEFAULT_CONFIG }
   }
 
-  function saveConfig(config: RavenConfig) {
+  function writeConfig(config: RavenConfig) {
     try {
       mkdirSync(ravenConfigDir, { recursive: true })
       writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n")
@@ -517,6 +516,21 @@ export default (async (input: PluginInput) => {
   }
 
   let config = loadConfig()
+
+  function updateConfig(update: Partial<RavenConfig> | ((latest: RavenConfig) => Partial<RavenConfig>)): RavenConfig {
+    try {
+      const raw = existsSync(configFile) ? JSON.parse(readFileSync(configFile, "utf-8")) : config
+      const latest = normalizeConfig(raw)
+      const patch = typeof update === "function" ? update(latest) : update
+      config = normalizeConfig({ ...latest, ...patch })
+      writeConfig({ ...raw, ...patch })
+    } catch {
+      // Keep malformed or partially-written external edits intact instead of replacing them.
+      const patch = typeof update === "function" ? update(config) : update
+      config = normalizeConfig({ ...config, ...patch })
+    }
+    return config
+  }
   let mcpMetadata = loadMcpMetadata()
   const ravenSessions = new Set<string>()
   const ravenTaskCalls = new Set<string>()
@@ -1280,9 +1294,10 @@ Then restart opencode for the model change to take effect. If the task can be co
 
   function addBytes(bytes: number) {
     sessionBytes += bytes
-    totalBytes += bytes
-    config.stats = { bytes: totalBytes }
-    saveConfig(config)
+    const updated = updateConfig((latest) => ({
+      stats: { bytes: Math.max(totalBytes, latest.stats?.bytes ?? 0) + bytes },
+    }))
+    totalBytes = updated.stats?.bytes ?? totalBytes + bytes
   }
 
   function formatBytes(bytes: number): string {
@@ -1815,14 +1830,12 @@ Then restart opencode for the model change to take effect. If the task can be co
       const arg = raw.toLowerCase()
 
       if (arg === "on") {
-        config.enabled = true
-        saveConfig(config)
+        updateConfig({ enabled: true })
         output.parts.push({ type: "text", text: "Raven tool/MCP routing enabled. Non-Raven agents will be redirected to raven_seek for configured tools." })
       } else if (arg === "help") {
         output.parts.push({ type: "text", text: helpText() })
       } else if (arg === "off") {
-        config.enabled = false
-        saveConfig(config)
+        updateConfig({ enabled: false })
         output.parts.push({ type: "text", text: "Raven tool/MCP routing disabled. All agents can use tools directly." })
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: statsText() })
@@ -1838,12 +1851,14 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (!key || !["add", "remove", "rm"].includes(action) || !name) {
           output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>\n\nGlobal MCPs are auto-routed by detected OpenCode MCP server name." })
         } else {
-          const values = uniqueStrings(config[key])
-          const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())
-          config[key] = action === "add"
-            ? exists ? values : [...values, name]
-            : values.filter((value) => value.toLowerCase() !== name.toLowerCase())
-          saveConfig(config)
+          updateConfig((latest) => {
+            const values = uniqueStrings(latest[key])
+            const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())
+            const next = action === "add"
+              ? exists ? values : [...values, name]
+              : values.filter((value) => value.toLowerCase() !== name.toLowerCase())
+            return key === "routeTools" ? { routeTools: next } : { routeToolKeywords: next }
+          })
           output.parts.push({ type: "text", text: routeSummary() })
         }
       } else if (arg === "mcp") {
@@ -1864,8 +1879,7 @@ Then restart opencode for the model change to take effect. If the task can be co
           if (detail !== "full" && detail !== "minimized") {
             output.parts.push({ type: "text", text: `Usage: /raven mcp detail full|minimized\nCurrent: ${config.onDemandMcpDescriptionDetail ?? "full"}` })
           } else {
-            config.onDemandMcpDescriptionDetail = detail
-            saveConfig(config)
+            updateConfig({ onDemandMcpDescriptionDetail: detail })
             output.parts.push({ type: "text", text: `On-demand MCP guidance detail set to: ${detail}\nRestart opencode for startup instructions/tool descriptions to fully refresh.` })
           }
         } else {
@@ -1890,8 +1904,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (!model) {
           output.parts.push({ type: "text", text: `Usage: /raven model <name>\nCurrent model: ${config.model || fm.model || "(default)"}` })
         } else {
-          config.model = model
-          saveConfig(config)
+          updateConfig({ model })
           ravenProviderIssue = undefined
           output.parts.push({ type: "text", text: `Raven model set to: ${model}\nRestart opencode for the change to take effect.` })
         }
@@ -1900,8 +1913,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (!effort) {
           output.parts.push({ type: "text", text: `Usage: /raven effort <value>\nCurrent: ${config.reasoning_effort || fm.reasoning_effort || "(default)"}` })
         } else {
-          config.reasoning_effort = effort
-          saveConfig(config)
+          updateConfig({ reasoning_effort: effort })
           output.parts.push({ type: "text", text: `Raven reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
         }
       } else if (arg.startsWith("timeout ")) {
@@ -1909,8 +1921,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (!Number.isInteger(secs) || secs < 10 || secs > MAX_TIMEOUT_SECONDS) {
           output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be between 10 and ${MAX_TIMEOUT_SECONDS}. Current: ${config.timeout ?? 600}s` })
         } else {
-          config.timeout = secs
-          saveConfig(config)
+          updateConfig({ timeout: secs })
           output.parts.push({ type: "text", text: `Raven timeout set to ${secs}s. Takes effect immediately.` })
         }
       } else {

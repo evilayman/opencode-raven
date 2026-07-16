@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.7
+
+### Fixed
+- Stats and `/raven` setting updates now patch the latest on-disk configuration instead of rewriting stale in-memory state, preserving externally edited MCP servers and headers.
+- Existing malformed or partially written configuration files are preserved for repair instead of being replaced with defaults.
+
 ## 2.1.6
 
 ### Added
