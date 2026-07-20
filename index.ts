@@ -533,6 +533,7 @@ export default (async (input: PluginInput) => {
   }
   let mcpMetadata = loadMcpMetadata()
   const ravenSessions = new Set<string>()
+  const activeRavenPrompts = new Set<string>()
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
   const ravenSessionParents = new Map<string, string>()
@@ -1346,9 +1347,7 @@ Then restart opencode for the model change to take effect. If the task can be co
     return { current: PACKAGE_VERSION, latest, available: !!latest && compareVersions(latest, PACKAGE_VERSION) > 0 }
   }
 
-  async function countRavenSavedCandidateBytes(sessionId: string): Promise<number> {
-    const messagesResp = await client.session.messages({ path: { id: sessionId }, query: { limit: 200 } })
-    const messages = (messagesResp as any)?.data ?? []
+  function estimateRavenSavedCandidateBytes(messages: any[]): number {
     const assistantMessages = messages.filter((m: any) =>
       m?.info?.role === "assistant" && m?.info?.tokens?.output > 0
     )
@@ -1365,6 +1364,12 @@ Then restart opencode for the model change to take effect. If the task can be co
       : 0
     const savedCandidateTokens = Math.max(0, totalTokens - baselineTokens)
     return savedCandidateTokens * 4
+  }
+
+  async function countRavenSavedCandidateBytes(sessionId: string, signal?: AbortSignal): Promise<number> {
+    const messagesResp = await client.session.messages({ path: { id: sessionId }, signal })
+    const messages = (messagesResp as any)?.data ?? []
+    return estimateRavenSavedCandidateBytes(messages)
   }
 
   async function getUpdateInfo(): Promise<{ current: string; latest?: string; available: boolean }> {
@@ -1532,29 +1537,81 @@ Then restart opencode for the model change to take effect. If the task can be co
     // Register raven_seek tool — lets agents with task:false still delegate through Raven
     tool: {
       "raven_seek": tool({
-        description: "Unified Raven delegation tool. Use this whenever a tool/MCP is blocked by Raven, or when grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, on-demand MCP capabilities, or search-like bash would be used. Handles routed MCP requests, on-demand MCPs, local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
+        description: "Unified Raven delegation tool. Creates a Raven child session or resumes one for follow-up research. Use this whenever a tool/MCP is blocked by Raven, or when grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, on-demand MCP capabilities, or search-like bash would be used. Handles routed MCP requests, on-demand MCPs, local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
         args: {
           query: tool.schema.string().describe("What Raven should do. Include the original blocked tool/MCP request and relevant args, exact URLs when replacing WebFetch, and commands/output checks when replacing grep/rg/head over command output."),
+          sessionId: tool.schema.string().optional().describe("Raven session ID returned by an earlier raven_seek call. Provide it only when this request should continue that session's research context."),
         },
         async execute(args, context) {
           const started = Date.now()
           const timeout = (config.timeout ?? 600) * 1000
+          let sessionId: string | undefined
+          let resumed = false
+          let previousSavedCandidate = 0
           try {
-            // Create a Raven session
-            const session = await client.session.create({
-              body: {
-                parentID: context.sessionID,
-                title: `raven_seek: ${args.query.slice(0, 80)}`,
-              },
-              signal: context.abort,
-            })
+            const requestedSessionId = args.sessionId?.trim()
+            if (args.sessionId !== undefined && !requestedSessionId) {
+              return { title: "Raven Seek", output: "Cannot resume Raven: sessionId must not be empty." }
+            }
 
-            const sessionId = (session as any)?.data?.id ?? (session as any)?.id
-            if (!sessionId) {
-              return { title: "Raven Seek", output: "Failed to create Raven session." }
+            if (requestedSessionId) {
+              const knownRavenSession = ravenSessions.has(requestedSessionId) || sessionAgents.get(requestedSessionId) === "raven"
+              let existingSession: any
+              try {
+                const sessionResp = await client.session.get({ path: { id: requestedSessionId }, signal: context.abort })
+                existingSession = (sessionResp as any)?.data ?? sessionResp
+              } catch (err) {
+                if (context.abort.aborted) throw err
+                return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
+              }
+
+              if (!existingSession?.id || existingSession.id !== requestedSessionId) {
+                return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
+              }
+              if (existingSession.parentID !== context.sessionID || existingSession.projectID !== input.project.id) {
+                return { title: "Raven Seek", output: "Cannot resume Raven: sessionId is not a Raven child of this main session." }
+              }
+
+              let messages: any[]
+              try {
+                const messagesResp = await client.session.messages({ path: { id: requestedSessionId }, signal: context.abort })
+                const messageData = (messagesResp as any)?.data
+                if (!Array.isArray(messageData)) {
+                  return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: its message history could not be read.` }
+                }
+                messages = messageData
+              } catch (err) {
+                if (context.abort.aborted) throw err
+                return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: its message history could not be read.` }
+              }
+
+              const userMessages = messages.filter((message: any) => message?.info?.role === "user")
+              const persistedRavenSession = userMessages.length > 0
+                && userMessages.every((message: any) => message.info.agent === "raven")
+              if (!persistedRavenSession && !(knownRavenSession && userMessages.length === 0)) {
+                return { title: "Raven Seek", output: "Cannot resume Raven: sessionId is not a Raven child of this main session." }
+              }
+
+              sessionId = requestedSessionId
+              resumed = true
+              previousSavedCandidate = estimateRavenSavedCandidateBytes(messages)
+            } else {
+              const session = await client.session.create({
+                body: {
+                  parentID: context.sessionID,
+                  title: `raven_seek: ${args.query.slice(0, 80)}`,
+                },
+                signal: context.abort,
+              })
+
+              sessionId = (session as any)?.data?.id ?? (session as any)?.id
+              if (!sessionId) {
+                return { title: "Raven Seek", output: "Failed to create Raven session." }
+              }
             }
 
             ravenSessions.add(sessionId)
+            const activeSessionId = sessionId
 
             // Preserve the child session link for TUI clients that render it.
             context.metadata({ metadata: { sessionId } })
@@ -1566,13 +1623,33 @@ Then restart opencode for the model change to take effect. If the task can be co
               writeFileSync(logFile, `${ts} ${sessionId}\n`)
             } catch { /* non-fatal */ }
 
+            if (activeRavenPrompts.has(activeSessionId)) {
+              return {
+                title: "Raven Seek",
+                metadata: { sessionId: activeSessionId },
+                output: `Raven session \`${activeSessionId}\` is already handling a request. Wait for it to finish before sending another follow-up.`,
+              }
+            }
+            activeRavenPrompts.add(activeSessionId)
+
             // Send the query to Raven with timeout. Provider/API errors are also
             // surfaced through message.updated events; fail as soon as one lands
             // so the caller does not wait for the full timeout on quota/auth issues.
             let timer: ReturnType<typeof setTimeout> | undefined
             let promptCompleted = false
+            let sessionAbort: Promise<unknown> | undefined
             const promptController = new AbortController()
-            const abortPrompt = () => promptController.abort(context.abort.reason)
+            const abortPrompt = () => {
+              if (promptController.signal.aborted) return
+              promptController.abort(context.abort.reason)
+              const abortController = new AbortController()
+              const abortTimer = setTimeout(() => abortController.abort(), Math.min(timeout, 5_000))
+              sessionAbort = client.session.abort({
+                path: { id: activeSessionId },
+                signal: abortController.signal,
+                throwOnError: true,
+              }).catch(() => undefined).finally(() => clearTimeout(abortTimer))
+            }
             if (context.abort.aborted) abortPrompt()
             else context.abort.addEventListener("abort", abortPrompt, { once: true })
             const providerError = waitForRavenProviderError(sessionId)
@@ -1586,12 +1663,13 @@ Then restart opencode for the model change to take effect. If the task can be co
                     parts: [{ type: "text", text: args.query }],
                   },
                   signal: promptController.signal,
+                  throwOnError: true,
                 }),
                 providerError,
                 firstProgress,
                 new Promise<never>((_, reject) => {
                   timer = setTimeout(() => {
-                    promptController.abort()
+                    abortPrompt()
                     reject(new Error(`Raven timed out after ${timeout / 1000}s — child session retained: ${sessionId}`))
                   }, timeout)
                 }),
@@ -1599,6 +1677,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               promptCompleted = true
               if (timer) clearTimeout(timer)
               clearRavenWaiters(sessionId)
+              if ((result as any)?.error) throw new Error(providerErrorMessage((result as any).error))
 
               const elapsed = ((Date.now() - started) / 1000).toFixed(1)
 
@@ -1611,44 +1690,62 @@ Then restart opencode for the model change to take effect. If the task can be co
 
               // Context saved = Raven output/reasoning/cache context - compact answer returned to main session.
               let savedCandidate = 0
+              const statsController = new AbortController()
+              const abortStats = () => statsController.abort(context.abort.reason)
+              const statsTimer = setTimeout(() => statsController.abort(), Math.min(timeout, 5_000))
+              if (context.abort.aborted) abortStats()
+              else context.abort.addEventListener("abort", abortStats, { once: true })
               try {
-                savedCandidate = await countRavenSavedCandidateBytes(sessionId)
+                const totalSavedCandidate = await countRavenSavedCandidateBytes(sessionId, statsController.signal)
+                savedCandidate = Math.max(0, totalSavedCandidate - previousSavedCandidate)
               } catch { /* best-effort */ }
+              finally {
+                clearTimeout(statsTimer)
+                context.abort.removeEventListener("abort", abortStats)
+              }
               if (savedCandidate <= 0) {
                 for (const part of parts) {
                   if (part.args) savedCandidate += JSON.stringify(part.args).length
                   if (part.content) savedCandidate += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
                 }
               }
-              const saved = Math.max(0, savedCandidate - output.length)
-              addBytes(saved)
+              const continuation = `Raven session: \`${sessionId}\`${resumed ? " (continued)" : ""}. Pass this as \`sessionId\` in a later \`raven_seek\` call to continue the same research.`
+              const resultOutput = `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*\n\n${continuation}`
+              addBytes(Math.max(0, savedCandidate - resultOutput.length))
               ravenProviderIssue = undefined
 
-              return { title: "Raven Seek", metadata: { sessionId }, output: `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*` }
+              return { title: "Raven Seek", metadata: { sessionId }, output: resultOutput }
             } finally {
               context.abort.removeEventListener("abort", abortPrompt)
-              if (!promptCompleted) promptController.abort()
+              if (!promptCompleted) abortPrompt()
+              if (sessionAbort) await sessionAbort
               if (timer) clearTimeout(timer)
               clearRavenWaiters(sessionId)
+              activeRavenPrompts.delete(activeSessionId)
             }
           } catch (err: any) {
             const elapsed = ((Date.now() - started) / 1000).toFixed(1)
             const msg = String(err?.message ?? err ?? "").toLowerCase()
+            const missingSession = /session.*not found|not found.*session/i.test(msg)
             const hint =
               context.abort.aborted ? "Raven search cancelled."
               : /rate.?limit|too many requests|429/i.test(msg) ? "Raven rate limited — wait 30s then retry with a narrower query."
               : /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|insufficient.*(?:credit|balance|quota)/i.test(msg) ? "Raven API quota/subscription exhausted — proceed without Raven, tell the user Raven could not run, and mention what information may be missing."
               : /auth|unauthorized|forbidden|401|403|api key|login/i.test(msg) ? "Raven provider authentication failed — proceed without Raven and tell the user to check the Raven model/provider login or API key."
               : /token|context.?length|too large|too long/i.test(msg) ? "Raven query too large — shorten your query and retry."
+              : missingSession ? "The Raven session is no longer available — retry without sessionId to start a new Raven search."
               : /model|unavailable|down|not found/i.test(msg) ? "Raven model unavailable — retry later, or proceed without search."
               : /did not produce an initial response|retry dialog/i.test(msg) ? err.message
               : /timeout|timed.?out|session kept/i.test(msg) ? err.message
               : `Raven search failed. Proceed without search — note gaps for the user. [${err.message || err}]`
-            if (/quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|auth|unauthorized|forbidden|401|403|api key|login|model|unavailable|down|not found|did not produce an initial response|retry dialog/i.test(msg)) {
+            if (!missingSession && /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|auth|unauthorized|forbidden|401|403|api key|login|model|unavailable|down|not found|did not produce an initial response|retry dialog/i.test(msg)) {
               ravenProviderIssue = hint
             }
             const recovery = ravenProviderIssue ? `\n\n${ravenRecoveryInstructions()}` : ""
-            return { title: "Raven Seek", output: `${hint}${recovery}\n\n*Attempt took ${elapsed}s*` }
+            const continuation = sessionId && !missingSession
+              ? `\n\nRaven session: \`${sessionId}\`. Pass this as \`sessionId\` in a later \`raven_seek\` call to retry or continue.`
+              : ""
+            return { title: "Raven Seek", metadata: sessionId ? { sessionId } : undefined, output: `${hint}${recovery}\n\n*Attempt took ${elapsed}s*${continuation}` }
           }
         },
       }),
@@ -1768,6 +1865,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         const sessionId = evt.properties?.info?.id
         if (sessionId) {
           ravenSessions.delete(sessionId)
+          activeRavenPrompts.delete(sessionId)
           sessionAgents.delete(sessionId)
           clearRavenWaiters(sessionId)
           for (const [parentId, childId] of ravenSessionParents) {

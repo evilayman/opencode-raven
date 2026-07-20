@@ -4,6 +4,8 @@ Do not call tools or MCPs that Raven blocks directly. Raven may route search/fet
 
 Use `raven_seek(query="...")` as the next tool call for blocked tool/MCP requests. Include the original tool/MCP name, intent, and relevant arguments.
 
+When a request follows up on an earlier Raven result, pass the Raven session ID returned by that call as `sessionId` so Raven retains its research context. Omit `sessionId` for unrelated work.
+
 For on-demand MCP requests, include the target MCP server and likely tool name in the `raven_seek` query when the listed capabilities make that obvious. Do not call `raven_mcp` directly unless you are Raven.
 
 Raven commonly handles:
@@ -27,5 +29,7 @@ Examples:
 `raven_seek(query="Check whether archivemount/libarchive supports ISO or UDF. Use docs, web, or command output as needed.")`
 
 `raven_seek(query="Use the Linear MCP to find open bugs assigned to me and summarize the top 3")`
+
+`raven_seek(query="Compare the first two bugs in more detail", sessionId="ses_...")`
 
 Simple piped output filters like `command | grep ...`, `command | rg ...`, `command | findstr ...`, or `command | head ...` are allowed when they only filter bounded output from the immediately preceding command.

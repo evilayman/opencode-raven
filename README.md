@@ -54,10 +54,10 @@ In this run, Raven handled the search-heavy web research in a child session and 
 
 1. Your agent attempts to use a routed search, fetch, shell-discovery, or MCP tool.
 2. Raven blocks the noisy direct call and gives the agent the exact `raven_seek` retry.
-3. The agent continues automatically through a linked Raven child session.
+3. The agent creates a linked Raven child session or resumes one for a related follow-up.
 4. Raven performs the tool-heavy work and returns only compact findings to the main session.
 
-The main model receives Raven's final answer instead of its raw tool output. Child sessions remain available in OpenCode's session/subagent view for inspection.
+The main model receives Raven's final answer instead of its raw tool output. Each result includes a Raven session ID that the main agent can pass back for a context-aware follow-up. Child sessions remain available in OpenCode's session/subagent view for inspection.
 
 For direct control, mention `@Raven` in any chat. This sends the request straight to the Raven agent, but it is optional and not required for automatic routing.
 
@@ -65,8 +65,17 @@ Under the hood, Raven registers two tools:
 
 | Tool | Purpose |
 |------|---------|
-| `raven_seek` | Creates a linked Raven child session and returns its compact result. |
+| `raven_seek` | Creates or resumes a linked Raven child session and returns its compact result. |
 | `raven_mcp` | Raven-only bridge to MCPs configured under `onDemandMcpServers`. |
+
+For a related follow-up, the main agent can reuse the ID returned by the earlier call:
+
+```text
+raven_seek(query="Research the available options")
+raven_seek(query="Compare the first two in more detail", sessionId="ses_...")
+```
+
+Raven accepts a resumed session only when it is a Raven child of the current main session. Unrelated work should omit `sessionId` and start a fresh child.
 
 OpenCode's built-in tools already exist; Raven routes selected calls instead of replacing those tools. Global MCPs also remain globally registered, so their schemas still enter the main session even when Raven routes their calls.
 

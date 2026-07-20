@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.8
+
+### Added
+- `raven_seek` now returns a model-visible session ID and accepts it through the optional `sessionId` argument, allowing follow-up research to continue in the same Raven session.
+- Resumed sessions are validated as Raven children of the current main session before they can be prompted again.
+
+### Fixed
+- Context estimates for resumed sessions count only the newly handled context instead of counting earlier Raven turns again.
+
 ## 2.1.7
 
 ### Fixed
