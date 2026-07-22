@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.1
+
+### Fixed
+- Plugin-created Raven sessions now emit a session update after creation so OpenCode adds root-level sessions to its navigable child-session list.
+
 ## 2.2.0
 
 ### Added

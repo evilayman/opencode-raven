@@ -162,15 +162,20 @@ describe("raven_seek session continuation", () => {
         : { id: "ses_root", projectID: "project-1" },
     }))
     const create = mock(async () => ({ data: { id: "ses_new" } }))
+    const update = mock(async () => ({ data: { id: "ses_new" } }))
     const prompt = mock(async () => ({ data: { parts: [{ type: "text", text: "Root-visible result" }] } }))
     const messages = mock(async () => ({ data: [] }))
-    const seek = await ravenSeek({ session: { get, create, prompt, messages } })
+    const seek = await ravenSeek({ session: { get, create, update, prompt, messages } })
     const { context } = toolContext()
 
     await seek.execute({ query: "Find evidence" }, context)
 
     expect(get).toHaveBeenCalledTimes(2)
     expect((create.mock.calls[0] as any)[0].body.parentID).toBe("ses_root")
+    expect((update.mock.calls[0] as any)[0]).toMatchObject({
+      path: { id: "ses_new" },
+      body: { title: "raven_seek: Find evidence" },
+    })
     expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven")
   })
 
@@ -306,14 +311,16 @@ describe("Raven MCP delegation", () => {
         : { id: "ses_root", projectID: "project-1" },
     }))
     const create = mock(async () => ({ data: { id: "ses_mcp" } }))
+    const update = mock(async () => ({ data: { id: "ses_mcp" } }))
     const prompt = mock(async () => ({ data: { parts: [{ type: "text", text: "MCP result" }] } }))
     const messages = mock(async () => ({ data: [] }))
-    const { mcp } = await ravenMcp({ session: { get, create, prompt, messages } })
+    const { mcp } = await ravenMcp({ session: { get, create, update, prompt, messages } })
     const { context } = toolContext()
 
     const result = await mcp.execute({ query: "Use Context7 for current docs" }, context)
 
     expect((create.mock.calls[0] as any)[0].body.parentID).toBe("ses_root")
+    expect((update.mock.calls[0] as any)[0].path.id).toBe("ses_mcp")
     expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven-mcp")
     expect(result.output).toContain("later `raven_mcp` call")
   })

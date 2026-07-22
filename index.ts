@@ -1558,6 +1558,19 @@ Then restart opencode for the model change to take effect. If the task can be co
     return sessionId
   }
 
+  async function syncCreatedSession(sessionId: string, title: string, signal?: AbortSignal) {
+    try {
+      await client.session.update({
+        path: { id: sessionId },
+        body: { title },
+        signal,
+      })
+    } catch (error) {
+      if (signal?.aborted) throw error
+      // Delegation still works if an older or disconnected TUI misses the sync event.
+    }
+  }
+
   async function executeRavenDelegation(kind: DelegationKind, args: { query: string; sessionId?: string }, context: any) {
     const started = Date.now()
     const agent = delegationAgent(kind)
@@ -1627,15 +1640,17 @@ Then restart opencode for the model change to take effect. If the task can be co
         resumed = true
         previousSavedCandidate = estimateRavenSavedCandidateBytes(messages)
       } else {
+        const sessionTitle = `${toolName}: ${args.query.slice(0, 80)}`
         const session = await client.session.create({
           body: {
             parentID: rootId,
-            title: `${toolName}: ${args.query.slice(0, 80)}`,
+            title: sessionTitle,
           },
           signal: context.abort,
         })
         sessionId = (session as any)?.data?.id ?? (session as any)?.id
         if (!sessionId) return { title, output: "Failed to create Raven session." }
+        await syncCreatedSession(sessionId, sessionTitle, context.abort)
       }
 
       ravenSessions.add(sessionId)
@@ -1909,10 +1924,11 @@ Then restart opencode for the model change to take effect. If the task can be co
               resumed = true
               previousSavedCandidate = estimateRavenSavedCandidateBytes(messages)
             } else {
+              const sessionTitle = `raven_seek: ${args.query.slice(0, 80)}`
               const session = await client.session.create({
                 body: {
                   parentID: rootId,
-                  title: `raven_seek: ${args.query.slice(0, 80)}`,
+                  title: sessionTitle,
                 },
                 signal: context.abort,
               })
@@ -1921,6 +1937,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               if (!sessionId) {
                 return { title: "Raven Seek", output: "Failed to create Raven session." }
               }
+              await syncCreatedSession(sessionId, sessionTitle, context.abort)
             }
 
             ravenSessions.add(sessionId)

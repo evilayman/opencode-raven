@@ -1,6 +1,6 @@
 {
   "name": "opencode-raven",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Context-saving search and on-demand MCP routing for OpenCode through focused Raven agents.",
   "main": "./index.ts",
   "exports": {
