@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0
+
+### Added
+- Separate Raven Search and Raven MCP agents with independent models, reasoning effort, instructions, and timeouts.
+- Public `raven_mcp` delegation tool and Raven-only `raven_mcp_bridge` for on-demand MCP operations.
+- Delegated sessions now attach directly to the root session so nested agent calls remain visible in the main session's child switcher.
+
+### Changed
+- Raven configuration now uses `raven_seek` and `raven_mcp` sections. Existing flat configuration migrates automatically without a version field.
+- `raven_seek` is explicitly limited to narrowly scoped search and evidence retrieval; review, audit, implementation, and judgment remain with the calling agent.
+- Per-agent commands replace the shared model, effort, and timeout commands.
+
+### Removed
+- `/raven on`, `/raven off`, and the configuration-wide `enabled` field. Search routing is active while the plugin is installed.
+- Shared `/raven model`, `/raven effort`, and `/raven timeout` commands.
+
 ## 2.1.8
 
 ### Added

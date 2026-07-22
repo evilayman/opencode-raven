@@ -1,7 +1,7 @@
 {
   "name": "opencode-raven",
-  "version": "2.1.8",
-  "description": "Context-saving search and on-demand MCP routing for OpenCode through a focused Raven subagent.",
+  "version": "2.2.0",
+  "description": "Context-saving search and on-demand MCP routing for OpenCode through focused Raven agents.",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts"
@@ -10,6 +10,7 @@
   "files": [
     "index.ts",
     "Raven.md",
+    "RavenMcp.md",
     "Raven.png",
     "example.gif",
     "mcp-guidance.md",

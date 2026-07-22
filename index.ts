@@ -12,6 +12,7 @@ import { homedir, tmpdir } from "node:os"
 const PKG_DIR = import.meta.dirname!
 
 const RAVEN_MD = join(PKG_DIR, "Raven.md")
+const RAVEN_MCP_MD = join(PKG_DIR, "RavenMcp.md")
 const MCP_GUIDANCE_MD = join(PKG_DIR, "mcp-guidance.md")
 const PACKAGE_JSON = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8"))
 const PACKAGE_NAME = PACKAGE_JSON.name || "opencode-raven"
@@ -62,7 +63,7 @@ const DEFAULT_ON_DEMAND_MCP_METADATA: Record<string, OnDemandMcpMetadata> = {
   },
 }
 
-const NEVER_ROUTE_TOOLS = new Set(["raven_seek", "raven_mcp", "task", "subtask"])
+const NEVER_ROUTE_TOOLS = new Set(["raven_seek", "raven_mcp", "raven_mcp_bridge", "task", "subtask"])
 const MAX_TIMER_MS = 2_147_483_647
 const MAX_TIMEOUT_SECONDS = Math.floor(MAX_TIMER_MS / 1000)
 
@@ -214,37 +215,57 @@ type OnDemandMcpServer = RemoteOnDemandMcpServer | LocalOnDemandMcpServer
 type OnDemandMcpDescriptionDetail = "full" | "minimized"
 type RavenMcpOperation = "list_tools" | "call_tool" | "list_resources" | "read_resource" | "list_prompts" | "get_prompt"
 
-interface RavenConfig {
-  enabled: boolean
+interface RavenSeekConfig {
   model?: string
   reasoning_effort?: string
-  ravenInstructions?: string
+  instructions?: string
   routeTools?: string[]
   routeToolKeywords?: string[]
-  onDemandMcpDescriptionDetail?: OnDemandMcpDescriptionDetail
-  onDemandMcpServers?: Record<string, OnDemandMcpServer>
   excludeAgents?: string[]
   excludeTools?: string[]
   timeout?: number
+}
+
+interface RavenMcpConfig {
+  model?: string
+  reasoning_effort?: string
+  instructions?: string
+  timeout?: number
+  descriptionDetail?: OnDemandMcpDescriptionDetail
+  onDemandMcpServers?: Record<string, OnDemandMcpServer>
+}
+
+interface RavenConfig {
+  raven_seek: RavenSeekConfig
+  raven_mcp: RavenMcpConfig
   stats?: { bytes: number }
 }
 
 // ── Parse Raven.md frontmatter ──
 const ravenMd = readFileSync(RAVEN_MD, "utf-8")
 const { frontmatter: fm, prompt: ravenPrompt } = parseRavenMd(ravenMd)
+const ravenMcpMd = readFileSync(RAVEN_MCP_MD, "utf-8")
+const { frontmatter: mcpFm, prompt: ravenMcpPrompt } = parseRavenMd(ravenMcpMd)
 
 const DEFAULT_CONFIG: RavenConfig = {
-  enabled: true,
-  model: fm.model,
-  reasoning_effort: fm.reasoning_effort,
-  ravenInstructions: "",
-  routeTools: DEFAULT_ROUTE_TOOLS,
-  routeToolKeywords: DEFAULT_ROUTE_TOOL_KEYWORDS,
-  onDemandMcpDescriptionDetail: "full",
-  onDemandMcpServers: DEFAULT_ON_DEMAND_MCP_SERVERS,
-  excludeAgents: [],
-  excludeTools: [],
-  timeout: 600,
+  raven_seek: {
+    model: fm.model,
+    reasoning_effort: fm.reasoning_effort,
+    instructions: "",
+    routeTools: DEFAULT_ROUTE_TOOLS,
+    routeToolKeywords: DEFAULT_ROUTE_TOOL_KEYWORDS,
+    excludeAgents: [],
+    excludeTools: [],
+    timeout: 600,
+  },
+  raven_mcp: {
+    model: mcpFm.model,
+    reasoning_effort: mcpFm.reasoning_effort,
+    instructions: "",
+    timeout: 600,
+    descriptionDetail: "full",
+    onDemandMcpServers: DEFAULT_ON_DEMAND_MCP_SERVERS,
+  },
 }
 
 function parseRavenMd(raw: string): { frontmatter: Record<string, any>; prompt: string } {
@@ -442,24 +463,41 @@ export default (async (input: PluginInput) => {
 
   function normalizeConfig(raw: any): RavenConfig {
     const source = raw && typeof raw === "object" ? raw : {}
-    const normalized: RavenConfig = { ...DEFAULT_CONFIG }
-
-    normalized.enabled = source.enabled !== false
-    normalized.model = typeof source.model === "string" ? source.model : DEFAULT_CONFIG.model
-    normalized.reasoning_effort = typeof source.reasoning_effort === "string" ? source.reasoning_effort : DEFAULT_CONFIG.reasoning_effort
-    normalized.ravenInstructions = typeof source.ravenInstructions === "string" ? source.ravenInstructions : DEFAULT_CONFIG.ravenInstructions
-    normalized.routeTools = uniqueStrings(source.routeTools, DEFAULT_ROUTE_TOOLS)
-    normalized.routeToolKeywords = uniqueStrings(source.routeToolKeywords, DEFAULT_ROUTE_TOOL_KEYWORDS)
-    normalized.onDemandMcpDescriptionDetail = source.onDemandMcpDescriptionDetail === "minimized" ? "minimized" : "full"
-    normalized.onDemandMcpServers = source.onDemandMcpServers === undefined
-      ? cloneOnDemandMcpServers(DEFAULT_ON_DEMAND_MCP_SERVERS)
-      : normalizeOnDemandMcpServers(source.onDemandMcpServers)
-    normalized.excludeAgents = uniqueStrings(source.excludeAgents)
-    normalized.excludeTools = uniqueStrings(source.excludeTools)
-    normalized.timeout = typeof source.timeout === "number" && Number.isFinite(source.timeout)
-      && source.timeout >= 10 && source.timeout <= MAX_TIMEOUT_SECONDS
-      ? Math.floor(source.timeout)
-      : DEFAULT_CONFIG.timeout
+    const seekSource = source.raven_seek && typeof source.raven_seek === "object" ? source.raven_seek : source
+    const mcpSource = source.raven_mcp && typeof source.raven_mcp === "object" ? source.raven_mcp : source
+    const legacyInstructions = typeof source.ravenInstructions === "string" ? source.ravenInstructions : undefined
+    const normalized: RavenConfig = {
+      raven_seek: {
+        model: typeof seekSource.model === "string" ? seekSource.model : DEFAULT_CONFIG.raven_seek.model,
+        reasoning_effort: typeof seekSource.reasoning_effort === "string" ? seekSource.reasoning_effort : DEFAULT_CONFIG.raven_seek.reasoning_effort,
+        instructions: typeof seekSource.instructions === "string" ? seekSource.instructions : legacyInstructions ?? "",
+        routeTools: uniqueStrings(seekSource.routeTools, DEFAULT_ROUTE_TOOLS),
+        routeToolKeywords: uniqueStrings(seekSource.routeToolKeywords, DEFAULT_ROUTE_TOOL_KEYWORDS),
+        excludeAgents: uniqueStrings(seekSource.excludeAgents),
+        excludeTools: uniqueStrings(seekSource.excludeTools),
+        timeout: typeof seekSource.timeout === "number" && Number.isFinite(seekSource.timeout)
+          && seekSource.timeout >= 10 && seekSource.timeout <= MAX_TIMEOUT_SECONDS
+          ? Math.floor(seekSource.timeout)
+          : DEFAULT_CONFIG.raven_seek.timeout,
+      },
+      raven_mcp: {
+        model: typeof mcpSource.model === "string" ? mcpSource.model : DEFAULT_CONFIG.raven_mcp.model,
+        reasoning_effort: typeof mcpSource.reasoning_effort === "string" ? mcpSource.reasoning_effort : DEFAULT_CONFIG.raven_mcp.reasoning_effort,
+        instructions: typeof mcpSource.instructions === "string" ? mcpSource.instructions : legacyInstructions ?? "",
+        timeout: typeof mcpSource.timeout === "number" && Number.isFinite(mcpSource.timeout)
+          && mcpSource.timeout >= 10 && mcpSource.timeout <= MAX_TIMEOUT_SECONDS
+          ? Math.floor(mcpSource.timeout)
+          : DEFAULT_CONFIG.raven_mcp.timeout,
+        descriptionDetail: mcpSource.descriptionDetail === "minimized"
+          ? "minimized"
+          : mcpSource.descriptionDetail === "full"
+            ? "full"
+            : source.onDemandMcpDescriptionDetail === "minimized" ? "minimized" : "full",
+        onDemandMcpServers: mcpSource.onDemandMcpServers === undefined
+          ? cloneOnDemandMcpServers(DEFAULT_ON_DEMAND_MCP_SERVERS)
+          : normalizeOnDemandMcpServers(mcpSource.onDemandMcpServers),
+      },
+    }
     normalized.stats = source.stats && typeof source.stats === "object"
       && typeof source.stats.bytes === "number" && Number.isFinite(source.stats.bytes) && source.stats.bytes >= 0
       ? { bytes: Math.round(source.stats.bytes) }
@@ -472,7 +510,9 @@ export default (async (input: PluginInput) => {
     if (existsSync(configFile)) {
       try {
         const raw = JSON.parse(readFileSync(configFile, "utf-8"))
-        return normalizeConfig(raw)
+        const normalized = normalizeConfig(raw)
+        if (!raw.raven_seek || !raw.raven_mcp) writeConfig(normalized)
+        return normalized
       } catch {
         // Preserve malformed or partially-written config so the user can repair it.
         return { ...DEFAULT_CONFIG }
@@ -487,7 +527,7 @@ export default (async (input: PluginInput) => {
     try {
       mkdirSync(ravenConfigDir, { recursive: true })
       writeFileSync(configFile, JSON.stringify(config, null, 2) + "\n")
-    } catch { /* non-fatal: config won't persist but toggle still works in-session */ }
+    } catch { /* non-fatal: config changes remain in-session */ }
   }
 
   function loadMcpMetadata(): Record<string, OnDemandMcpMetadata> {
@@ -522,17 +562,29 @@ export default (async (input: PluginInput) => {
       const raw = existsSync(configFile) ? JSON.parse(readFileSync(configFile, "utf-8")) : config
       const latest = normalizeConfig(raw)
       const patch = typeof update === "function" ? update(latest) : update
-      config = normalizeConfig({ ...latest, ...patch })
-      writeConfig({ ...raw, ...patch })
+      config = normalizeConfig({
+        ...latest,
+        ...patch,
+        raven_seek: { ...latest.raven_seek, ...patch.raven_seek },
+        raven_mcp: { ...latest.raven_mcp, ...patch.raven_mcp },
+      })
+      writeConfig(config)
     } catch {
       // Keep malformed or partially-written external edits intact instead of replacing them.
       const patch = typeof update === "function" ? update(config) : update
-      config = normalizeConfig({ ...config, ...patch })
+      config = normalizeConfig({
+        ...config,
+        ...patch,
+        raven_seek: { ...config.raven_seek, ...patch.raven_seek },
+        raven_mcp: { ...config.raven_mcp, ...patch.raven_mcp },
+      })
     }
     return config
   }
   let mcpMetadata = loadMcpMetadata()
+  type DelegationKind = "seek" | "mcp"
   const ravenSessions = new Set<string>()
+  const ravenSessionKinds = new Map<string, DelegationKind>()
   const activeRavenPrompts = new Set<string>()
   const ravenTaskCalls = new Set<string>()
   const sessionAgents = new Map<string, string>()
@@ -551,8 +603,10 @@ export default (async (input: PluginInput) => {
   let mcpRefreshQueue: Promise<unknown> = Promise.resolve()
   const mcpRefreshControllers = new Set<AbortController>()
   let lastNotifiedMcpFailureKey = ""
-  let ravenProviderIssue: string | undefined
+  const ravenProviderIssues: Partial<Record<DelegationKind, string>> = {}
 
+  // Replace generated instructions from older releases before OpenCode consumes them.
+  saveDynamicGuidance()
   resetOnDemandMcpRuntimeStatuses()
 
   function resetOnDemandMcpRuntimeStatuses() {
@@ -571,16 +625,16 @@ export default (async (input: PluginInput) => {
 
   // ── Check if an agent is excluded from Raven enforcement (case-insensitive) ──
   function isExcluded(agent: string | undefined): boolean {
-    if (!agent || !config.excludeAgents?.length) return false
+    if (!agent || !config.raven_seek.excludeAgents?.length) return false
     const lower = agent.toLowerCase()
-    return config.excludeAgents.some((a) => a.toLowerCase() === lower)
+    return config.raven_seek.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
   function isRouteConfigured(toolName: string): boolean {
     const tool = toolName.toLowerCase()
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
-    if (config.routeTools?.some((name) => name.toLowerCase() === tool)) return true
-    if (config.routeToolKeywords?.some((keyword) => tool.includes(keyword.toLowerCase()))) return true
+    if (config.raven_seek.routeTools?.some((name) => name.toLowerCase() === tool)) return true
+    if (config.raven_seek.routeToolKeywords?.some((keyword) => tool.includes(keyword.toLowerCase()))) return true
     return globalMcpServers.some((server) => tool.startsWith(`${server.toLowerCase()}_`))
   }
 
@@ -611,30 +665,31 @@ export default (async (input: PluginInput) => {
   }
 
   function rerouteMessage(tool: string, args: any): string {
-    if (ravenProviderIssue) {
-      return `Raven is currently unavailable: ${ravenProviderIssue}
+    if (ravenProviderIssues.seek) {
+      return `Raven search is currently unavailable: ${ravenProviderIssues.seek}
 
-${ravenRecoveryInstructions()}`
+${ravenRecoveryInstructions("seek")}`
     }
     return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_seek(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
   }
 
-  function ravenRecoveryInstructions(): string {
+  function ravenRecoveryInstructions(kind: DelegationKind): string {
+    const command = kind === "mcp" ? "/raven mcp model <provider/model>" : "/raven seek model <provider/model>"
     return `Stop trying Raven-routed tools or MCPs for this request. Inform the user that Raven cannot run until its model/provider is changed or fixed.
 
 Tell the user to switch Raven's model with:
-  /raven model <provider/model>
+  ${command}
 
 Example:
-  /raven model openai/gpt-5.5
+  ${command.replace("<provider/model>", "openai/gpt-5.5")}
 
 Then restart opencode for the model change to take effect. If the task can be completed without Raven, continue without routed tools and clearly mention what could not be checked.`
   }
 
   function routeSummary(): string {
-    const tools = config.routeTools?.length ? config.routeTools.join(", ") : "(none)"
+    const tools = config.raven_seek.routeTools?.length ? config.raven_seek.routeTools.join(", ") : "(none)"
     const mcps = globalMcpServers.length ? `${globalMcpServers.join(", ")} (auto-detected)` : "none detected"
-    const keywords = config.routeToolKeywords?.length ? config.routeToolKeywords.join(", ") : "(none)"
+    const keywords = config.raven_seek.routeToolKeywords?.length ? config.raven_seek.routeToolKeywords.join(", ") : "(none)"
     const duplicates = duplicateMcpServers.length ? `\n  Duplicate MCP config: ${duplicateMcpServers.join(", ")} (configured globally and on-demand)` : ""
     return `Raven routing:\n  Routed tools: ${tools}\n  Routed global MCPs: ${mcps}\n  Routed tool keywords: ${keywords}${duplicates}`
   }
@@ -642,21 +697,27 @@ Then restart opencode for the model change to take effect. If the task can be co
   function mcpSummary(): string {
     const buckets = onDemandMcpStatusBuckets()
     const total = buckets.loaded.length + buckets.failed.length + buckets.pending.length
-    if (!total) return `Raven on-demand MCPs (always behind Raven): none configured.\n  Guidance detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`
+    if (!total) return `Raven on-demand MCPs (always behind Raven): none configured.\n  Guidance detail: ${config.raven_mcp.descriptionDetail ?? "full"}`
     const lines = [
       "Raven on-demand MCPs (always behind Raven):",
       `  Loaded: ${buckets.loaded.length ? buckets.loaded.join(", ") : "none"}`,
       `  Failed: ${buckets.failed.length ? buckets.failed.join(", ") : "none"}`,
       `  Pending: ${buckets.pending.length ? buckets.pending.join(", ") : "none"}`,
-      `  Guidance detail: ${config.onDemandMcpDescriptionDetail ?? "full"}`,
+      `  Guidance detail: ${config.raven_mcp.descriptionDetail ?? "full"}`,
     ]
     return lines.join("\n")
   }
 
   function ravenAgentPrompt(): string {
-    const extra = config.ravenInstructions?.trim()
+    const extra = config.raven_seek.instructions?.trim()
+    const prompt = ravenPrompt
+    return extra ? `${prompt}\n\nAdditional user instructions:\n${extra}` : prompt
+  }
+
+  function ravenMcpAgentPrompt(): string {
+    const extra = config.raven_mcp.instructions?.trim()
     const onDemand = onDemandMcpGuidance("raven")
-    const prompt = `${ravenPrompt}\n\nOn-demand MCP guidance:\n${onDemand}\nUse direct MCP tools when they are available globally. Use raven_mcp for on-demand MCPs listed above. If you do not know the exact tool name for an on-demand MCP, call raven_mcp with operation list_tools first, then call the selected tool with operation call_tool. For call_tool and get_prompt, pass arguments as a JSON object string in argumentsJson.`
+    const prompt = `${ravenMcpPrompt}\n\nOn-demand MCP guidance:\n${onDemand}`
     return extra ? `${prompt}\n\nAdditional user instructions:\n${extra}` : prompt
   }
 
@@ -700,7 +761,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function onDemandMcpGuidance(target: "delegate" | "raven" = "delegate", preferredOrder?: string[]): string {
-    const servers = config.onDemandMcpServers ?? {}
+    const servers = config.raven_mcp.onDemandMcpServers ?? {}
     const activeEntries = activeOnDemandMcpEntries()
     const entries = orderedOnDemandMcpEntries(
       target === "raven"
@@ -712,7 +773,7 @@ Then restart opencode for the model change to take effect. If the task can be co
     if (!activeEntries.length) return "No enabled on-demand MCPs are configured."
     if (!entries.length) return "No loaded on-demand MCPs are available."
 
-    const detail = config.onDemandMcpDescriptionDetail ?? "full"
+    const detail = config.raven_mcp.descriptionDetail ?? "full"
     const lines = entries.map(([name, server]) => {
       const metadata = mcpMetadata[name] ?? {}
       const userDescription = firstSentenceText(server.description)
@@ -726,9 +787,9 @@ Then restart opencode for the model change to take effect. If the task can be co
       return `- ${name}: ${summary} Tools: ${tools}`
     })
     if (target === "raven") {
-      return `Raven can handle these on-demand MCP capabilities through raven_mcp:\n${lines.join("\n")}`
+      return `Use raven_mcp_bridge for these on-demand MCP capabilities:\n${lines.join("\n")}`
     }
-    return `Raven can handle these on-demand MCP capabilities. Delegate matching requests with raven_seek; include the target MCP server and likely tool name when obvious, but do not call raven_mcp directly:\n${lines.join("\n")}`
+    return `Non-Raven agents can use these on-demand MCP capabilities through the public raven_mcp delegator. Use raven_mcp for matching requests and include the target MCP server and likely capability when obvious. The raven-mcp agent itself must call raven_mcp_bridge directly instead:\n${lines.join("\n")}`
   }
 
   function resolveEnvPlaceholders(value: string): string {
@@ -817,7 +878,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   let mcpIdleTimer: ReturnType<typeof setInterval> | undefined
 
   function mcpTimeoutMs(server: OnDemandMcpServer): number {
-    return server.timeout ?? (config.timeout ?? 600) * 1000
+    return server.timeout ?? (config.raven_mcp.timeout ?? 600) * 1000
   }
 
   async function closeMcpClient(client: Client, transport: any) {
@@ -918,7 +979,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function activeOnDemandMcpEntries(): [string, OnDemandMcpServer][] {
-    return Object.entries(config.onDemandMcpServers ?? {}).filter(([, server]) => server.enabled !== false)
+    return Object.entries(config.raven_mcp.onDemandMcpServers ?? {}).filter(([, server]) => server.enabled !== false)
   }
 
   function waitForMcpConnection(attempt: McpConnectionAttempt, signal?: AbortSignal): Promise<McpConnection> {
@@ -1215,7 +1276,7 @@ Then restart opencode for the model change to take effect. If the task can be co
 
   function onDemandMcpStatus(): string {
     const entries = activeOnDemandMcpEntries()
-    if (!Object.keys(config.onDemandMcpServers ?? {}).length) return "Raven on-demand MCPs: none configured."
+    if (!Object.keys(config.raven_mcp.onDemandMcpServers ?? {}).length) return "Raven on-demand MCPs: none configured."
     if (!entries.length) return "Raven on-demand MCPs: none enabled."
     const buckets = onDemandMcpStatusBuckets()
     const lines = entries.map(([name, server]) => {
@@ -1228,7 +1289,7 @@ Then restart opencode for the model change to take effect. If the task can be co
       const error = status === "failed" && metadata?.lastError ? `, error: ${metadata.lastError}` : ""
       return `- ${name} (${server.type}): ${displayMcpStatus(status)}, ${source}, ${generated}, ${tools}${avoided}${error}`
     })
-    return `Raven on-demand MCPs (${config.onDemandMcpDescriptionDetail ?? "full"} guidance):\n  Loaded: ${buckets.loaded.length ? buckets.loaded.join(", ") : "none"}\n  Failed: ${buckets.failed.length ? buckets.failed.join(", ") : "none"}\n  Pending: ${buckets.pending.length ? buckets.pending.join(", ") : "none"}\n${lines.join("\n")}`
+    return `Raven on-demand MCPs (${config.raven_mcp.descriptionDetail ?? "full"} guidance):\n  Loaded: ${buckets.loaded.length ? buckets.loaded.join(", ") : "none"}\n  Failed: ${buckets.failed.length ? buckets.failed.join(", ") : "none"}\n  Pending: ${buckets.pending.length ? buckets.pending.join(", ") : "none"}\n${lines.join("\n")}`
   }
 
   function avoidedMcpSchemaBytes(): number {
@@ -1245,7 +1306,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function helpText(): string {
-    return `Raven commands:\n  /raven help   — show this help\n  /raven on     — enable tool/MCP routing\n  /raven off    — disable tool/MCP routing\n  /raven route  — show or edit routed tools/keywords\n  /raven mcp    — show or refresh on-demand MCP metadata\n  /raven update — check npm, clear plugin cache if newer, then restart opencode\n  /raven model <name> — change Raven's model (requires restart)\n  /raven effort <value> — change Raven's reasoning effort (requires restart)\n  /raven timeout <seconds> — change raven_seek timeout\n  /raven stats  — show context saved`
+    return `Raven commands:\n  /raven help - show this help\n  /raven route - show or edit routed tools/keywords\n  /raven seek model <name> - change the search model (requires restart)\n  /raven seek effort <value> - change search reasoning effort (requires restart)\n  /raven seek timeout <seconds> - change search timeout\n  /raven mcp - show on-demand MCP metadata\n  /raven mcp refresh [server] - refresh MCP metadata\n  /raven mcp detail full|minimized - change MCP guidance detail\n  /raven mcp model <name> - change the MCP model (requires restart)\n  /raven mcp effort <value> - change MCP reasoning effort (requires restart)\n  /raven mcp timeout <seconds> - change MCP delegation timeout\n  /raven update - check for an update\n  /raven stats - show context saved`
   }
 
   function formatMcpList(title: string, items: any[], fields: string[] = ["name", "description"]): string {
@@ -1472,6 +1533,239 @@ Then restart opencode for the model change to take effect. If the task can be co
     } catch { /* duplicate MCP notifications are best-effort */ }
   }
 
+  function delegationAgent(kind: DelegationKind): "raven" | "raven-mcp" {
+    return kind === "mcp" ? "raven-mcp" : "raven"
+  }
+
+  function delegationToolName(kind: DelegationKind): "raven_seek" | "raven_mcp" {
+    return kind === "mcp" ? "raven_mcp" : "raven_seek"
+  }
+
+  function delegationTitle(kind: DelegationKind): string {
+    return kind === "mcp" ? "Raven MCP" : "Raven Seek"
+  }
+
+  async function rootSessionId(sessionId: string, signal?: AbortSignal): Promise<string> {
+    let current = sessionId
+    const seen = new Set<string>()
+    while (!seen.has(current)) {
+      seen.add(current)
+      const response = await client.session.get({ path: { id: current }, signal })
+      const session = (response as any)?.data ?? response
+      if (!session?.parentID) return current
+      current = session.parentID
+    }
+    return sessionId
+  }
+
+  async function executeRavenDelegation(kind: DelegationKind, args: { query: string; sessionId?: string }, context: any) {
+    const started = Date.now()
+    const agent = delegationAgent(kind)
+    const toolName = delegationToolName(kind)
+    const title = delegationTitle(kind)
+    const timeout = (kind === "mcp" ? config.raven_mcp.timeout : config.raven_seek.timeout) ?? 600
+    const timeoutMs = timeout * 1000
+    let sessionId: string | undefined
+    let resumed = false
+    let previousSavedCandidate = 0
+
+    try {
+      const requestedSessionId = args.sessionId?.trim()
+      if (args.sessionId !== undefined && !requestedSessionId) {
+        return { title, output: "Cannot resume Raven: sessionId must not be empty." }
+      }
+
+      let rootId = context.sessionID
+      try {
+        rootId = await rootSessionId(context.sessionID, context.abort)
+      } catch (error) {
+        if (context.abort.aborted) throw error
+        // Falling back preserves delegation if an older OpenCode build cannot read the caller session.
+      }
+
+      if (requestedSessionId) {
+        const knownKind = ravenSessionKinds.get(requestedSessionId)
+        const knownRavenSession = knownKind === kind || sessionAgents.get(requestedSessionId) === agent
+        let existingSession: any
+        try {
+          const sessionResp = await client.session.get({ path: { id: requestedSessionId }, signal: context.abort })
+          existingSession = (sessionResp as any)?.data ?? sessionResp
+        } catch (error) {
+          if (context.abort.aborted) throw error
+          return { title, output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
+        }
+
+        if (!existingSession?.id || existingSession.id !== requestedSessionId) {
+          return { title, output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
+        }
+        const validParent = existingSession.parentID === rootId || existingSession.parentID === context.sessionID
+        if (!validParent || existingSession.projectID !== input.project.id) {
+          return { title, output: "Cannot resume Raven: sessionId is not part of this main session's Raven tree." }
+        }
+
+        let messages: any[]
+        try {
+          const messagesResp = await client.session.messages({ path: { id: requestedSessionId }, signal: context.abort })
+          const messageData = (messagesResp as any)?.data
+          if (!Array.isArray(messageData)) {
+            return { title, output: `Cannot resume Raven session ${requestedSessionId}: its message history could not be read.` }
+          }
+          messages = messageData
+        } catch (error) {
+          if (context.abort.aborted) throw error
+          return { title, output: `Cannot resume Raven session ${requestedSessionId}: its message history could not be read.` }
+        }
+
+        const userMessages = messages.filter((message: any) => message?.info?.role === "user")
+        const persistedRavenSession = userMessages.length > 0
+          && userMessages.every((message: any) => message.info.agent === agent)
+        if (!persistedRavenSession && !(knownRavenSession && userMessages.length === 0)) {
+          return { title, output: `Cannot resume Raven: sessionId does not belong to the ${agent} agent.` }
+        }
+
+        sessionId = requestedSessionId
+        resumed = true
+        previousSavedCandidate = estimateRavenSavedCandidateBytes(messages)
+      } else {
+        const session = await client.session.create({
+          body: {
+            parentID: rootId,
+            title: `${toolName}: ${args.query.slice(0, 80)}`,
+          },
+          signal: context.abort,
+        })
+        sessionId = (session as any)?.data?.id ?? (session as any)?.id
+        if (!sessionId) return { title, output: "Failed to create Raven session." }
+      }
+
+      ravenSessions.add(sessionId)
+      ravenSessionKinds.set(sessionId, kind)
+      const activeSessionId = sessionId
+      context.metadata({ metadata: { sessionId } })
+
+      try {
+        writeFileSync(join(tmpdir(), "raven-sessions.log"), `${new Date().toISOString()} ${sessionId}\n`)
+      } catch { /* non-fatal */ }
+
+      if (activeRavenPrompts.has(activeSessionId)) {
+        return {
+          title,
+          metadata: { sessionId: activeSessionId },
+          output: `Raven session \`${activeSessionId}\` is already handling a request. Wait for it to finish before sending another follow-up.`,
+        }
+      }
+      activeRavenPrompts.add(activeSessionId)
+
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let promptCompleted = false
+      let sessionAbort: Promise<unknown> | undefined
+      const promptController = new AbortController()
+      const abortPrompt = () => {
+        if (promptController.signal.aborted) return
+        promptController.abort(context.abort.reason)
+        const abortController = new AbortController()
+        const abortTimer = setTimeout(() => abortController.abort(), Math.min(timeoutMs, 5_000))
+        sessionAbort = client.session.abort({
+          path: { id: activeSessionId },
+          signal: abortController.signal,
+          throwOnError: true,
+        }).catch(() => undefined).finally(() => clearTimeout(abortTimer))
+      }
+      if (context.abort.aborted) abortPrompt()
+      else context.abort.addEventListener("abort", abortPrompt, { once: true })
+      const providerError = waitForRavenProviderError(sessionId)
+      const firstProgress = waitForRavenFirstProgress(sessionId, Math.min(timeoutMs, 30_000))
+
+      try {
+        const result = await Promise.race([
+          client.session.prompt({
+            path: { id: sessionId },
+            body: { agent, parts: [{ type: "text", text: args.query }] },
+            signal: promptController.signal,
+            throwOnError: true,
+          }),
+          providerError,
+          firstProgress,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              abortPrompt()
+              reject(new Error(`Raven timed out after ${timeout}s - child session retained: ${sessionId}`))
+            }, timeoutMs)
+          }),
+        ])
+        promptCompleted = true
+        if (timer) clearTimeout(timer)
+        clearRavenWaiters(sessionId)
+        if ((result as any)?.error) throw new Error(providerErrorMessage((result as any).error))
+
+        const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+        const parts = (result as any)?.data?.parts ?? []
+        const output = parts
+          .filter((part: any) => part.type === "text" && part.text)
+          .map((part: any) => part.text)
+          .join("\n") || "Raven returned no results."
+
+        let savedCandidate = 0
+        const statsController = new AbortController()
+        const abortStats = () => statsController.abort(context.abort.reason)
+        const statsTimer = setTimeout(() => statsController.abort(), Math.min(timeoutMs, 5_000))
+        if (context.abort.aborted) abortStats()
+        else context.abort.addEventListener("abort", abortStats, { once: true })
+        try {
+          const totalSavedCandidate = await countRavenSavedCandidateBytes(sessionId, statsController.signal)
+          savedCandidate = Math.max(0, totalSavedCandidate - previousSavedCandidate)
+        } catch { /* best-effort */ }
+        finally {
+          clearTimeout(statsTimer)
+          context.abort.removeEventListener("abort", abortStats)
+        }
+        if (savedCandidate <= 0) {
+          for (const part of parts) {
+            if (part.args) savedCandidate += JSON.stringify(part.args).length
+            if (part.content) savedCandidate += typeof part.content === "string" ? part.content.length : JSON.stringify(part.content).length
+          }
+        }
+
+        const continuation = `Raven session: \`${sessionId}\`${resumed ? " (continued)" : ""}. Pass this as \`sessionId\` in a later \`${toolName}\` call to continue the same retrieval.`
+        const activity = kind === "mcp" ? "used MCPs" : "searched"
+        const resultOutput = `${output}\n\n*Raven ${activity} for ${elapsed}s - ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*\n\n${continuation}`
+        addBytes(Math.max(0, savedCandidate - resultOutput.length))
+        delete ravenProviderIssues[kind]
+        return { title, metadata: { sessionId }, output: resultOutput }
+      } finally {
+        context.abort.removeEventListener("abort", abortPrompt)
+        if (!promptCompleted) abortPrompt()
+        if (sessionAbort) await sessionAbort
+        if (timer) clearTimeout(timer)
+        clearRavenWaiters(sessionId)
+        activeRavenPrompts.delete(activeSessionId)
+      }
+    } catch (error: any) {
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+      const message = String(error?.message ?? error ?? "").toLowerCase()
+      const missingSession = /session.*not found|not found.*session/i.test(message)
+      const activity = kind === "mcp" ? "MCP retrieval" : "search"
+      const hint =
+        context.abort.aborted ? `Raven ${activity} cancelled.`
+        : /rate.?limit|too many requests|429/i.test(message) ? "Raven rate limited - wait 30s, then retry with a narrower query."
+        : /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|insufficient.*(?:credit|balance|quota)/i.test(message) ? "Raven API quota/subscription exhausted - proceed without Raven and mention what information may be missing."
+        : /auth|unauthorized|forbidden|401|403|api key|login/i.test(message) ? "Raven provider authentication failed - proceed without Raven and check the configured provider login or API key."
+        : /token|context.?length|too large|too long/i.test(message) ? "Raven query too large - shorten your query and retry."
+        : missingSession ? `The Raven session is no longer available - retry without sessionId to start a new ${activity}.`
+        : /model|unavailable|down|not found/i.test(message) ? "Raven model unavailable - retry later, or proceed without the missing information."
+        : /did not produce an initial response|retry dialog|timeout|timed.?out|session retained/i.test(message) ? error.message
+        : `Raven ${activity} failed. Note the resulting information gap. [${error.message || error}]`
+      if (!missingSession && /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|auth|unauthorized|forbidden|401|403|api key|login|model|unavailable|down|not found|did not produce an initial response|retry dialog/i.test(message)) {
+        ravenProviderIssues[kind] = hint
+      }
+      const recovery = ravenProviderIssues[kind] ? `\n\n${ravenRecoveryInstructions(kind)}` : ""
+      const continuation = sessionId && !missingSession
+        ? `\n\nRaven session: \`${sessionId}\`. Pass this as \`sessionId\` in a later \`${toolName}\` call to retry or continue.`
+        : ""
+      return { title, metadata: sessionId ? { sessionId } : undefined, output: `${hint}${recovery}\n\n*Attempt took ${elapsed}s*${continuation}` }
+    }
+  }
+
   return {
     async dispose() {
       for (const controller of mcpRefreshControllers) controller.abort()
@@ -1510,21 +1804,33 @@ Then restart opencode for the model change to take effect. If the task can be co
         description: fm.description || "",
         mode: fm.mode || "subagent",
         hidden: fm.hidden !== undefined ? fm.hidden : false,
-        model: config.model || fm.model,
+        model: config.raven_seek.model || fm.model,
         options: {
           ...extractOptions(fm),
-          ...(config.reasoning_effort ? { reasoning_effort: config.reasoning_effort } : {}),
+          ...(config.raven_seek.reasoning_effort ? { reasoning_effort: config.raven_seek.reasoning_effort } : {}),
         },
         permission: fm.permission || {},
         prompt: ravenAgentPrompt(),
+      }
+      configInput.agent["raven-mcp"] = {
+        description: mcpFm.description || "",
+        mode: mcpFm.mode || "subagent",
+        hidden: mcpFm.hidden !== undefined ? mcpFm.hidden : true,
+        model: config.raven_mcp.model || mcpFm.model,
+        options: {
+          ...extractOptions(mcpFm),
+          ...(config.raven_mcp.reasoning_effort ? { reasoning_effort: config.raven_mcp.reasoning_effort } : {}),
+        },
+        permission: mcpFm.permission || {},
+        prompt: ravenMcpAgentPrompt(),
       }
 
       // Register /raven command
       configInput.command = configInput.command || {}
       if (!configInput.command.raven) {
         configInput.command.raven = {
-          template: "Manage Raven: /raven on|off|route|mcp|update|model <name>|status",
-          description: "Toggle Raven routing, manage routed/on-demand MCPs, or change Raven's model",
+          template: "Manage Raven search routing, on-demand MCPs, models, timeouts, updates, and status",
+          description: "Manage Raven search routing, on-demand MCPs, and per-agent models",
         }
       }
 
@@ -1537,14 +1843,14 @@ Then restart opencode for the model change to take effect. If the task can be co
     // Register raven_seek tool — lets agents with task:false still delegate through Raven
     tool: {
       "raven_seek": tool({
-        description: "Unified Raven delegation tool. Creates a Raven child session or resumes one for follow-up research. Use this whenever a tool/MCP is blocked by Raven, or when grep, glob, WebFetch/fetch, websearch, docs lookup, GitHub search, on-demand MCP capabilities, or search-like bash would be used. Handles routed MCP requests, on-demand MCPs, local codebase search, filesystem discovery, specific URL/page reads, web/docs research, GitHub examples, and command-output/system inspection via Raven.",
+        description: "Search and evidence retrieval only. Creates or resumes a Raven Search session for routed local search, filesystem discovery, URL fetching, web/docs/GitHub search, globally configured MCP searches, or command-output inspection. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent must perform that work.",
         args: {
-          query: tool.schema.string().describe("What Raven should do. Include the original blocked tool/MCP request and relevant args, exact URLs when replacing WebFetch, and commands/output checks when replacing grep/rg/head over command output."),
+          query: tool.schema.string().describe("A narrowly scoped search or evidence-retrieval request. Include original blocked tool args, exact URLs, paths, patterns, or bounded command-output checks. Do not ask Raven to review or audit code."),
           sessionId: tool.schema.string().optional().describe("Raven session ID returned by an earlier raven_seek call. Provide it only when this request should continue that session's research context."),
         },
         async execute(args, context) {
           const started = Date.now()
-          const timeout = (config.timeout ?? 600) * 1000
+          const timeout = (config.raven_seek.timeout ?? 600) * 1000
           let sessionId: string | undefined
           let resumed = false
           let previousSavedCandidate = 0
@@ -1554,8 +1860,15 @@ Then restart opencode for the model change to take effect. If the task can be co
               return { title: "Raven Seek", output: "Cannot resume Raven: sessionId must not be empty." }
             }
 
+            let rootId = context.sessionID
+            try {
+              rootId = await rootSessionId(context.sessionID, context.abort)
+            } catch (error) {
+              if (context.abort.aborted) throw error
+            }
+
             if (requestedSessionId) {
-              const knownRavenSession = ravenSessions.has(requestedSessionId) || sessionAgents.get(requestedSessionId) === "raven"
+              const knownRavenSession = ravenSessionKinds.get(requestedSessionId) === "seek" || sessionAgents.get(requestedSessionId) === "raven"
               let existingSession: any
               try {
                 const sessionResp = await client.session.get({ path: { id: requestedSessionId }, signal: context.abort })
@@ -1568,7 +1881,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               if (!existingSession?.id || existingSession.id !== requestedSessionId) {
                 return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
               }
-              if (existingSession.parentID !== context.sessionID || existingSession.projectID !== input.project.id) {
+              if ((existingSession.parentID !== rootId && existingSession.parentID !== context.sessionID) || existingSession.projectID !== input.project.id) {
                 return { title: "Raven Seek", output: "Cannot resume Raven: sessionId is not a Raven child of this main session." }
               }
 
@@ -1598,7 +1911,7 @@ Then restart opencode for the model change to take effect. If the task can be co
             } else {
               const session = await client.session.create({
                 body: {
-                  parentID: context.sessionID,
+                  parentID: rootId,
                   title: `raven_seek: ${args.query.slice(0, 80)}`,
                 },
                 signal: context.abort,
@@ -1611,6 +1924,7 @@ Then restart opencode for the model change to take effect. If the task can be co
             }
 
             ravenSessions.add(sessionId)
+            ravenSessionKinds.set(sessionId, "seek")
             const activeSessionId = sessionId
 
             // Preserve the child session link for TUI clients that render it.
@@ -1712,7 +2026,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               const continuation = `Raven session: \`${sessionId}\`${resumed ? " (continued)" : ""}. Pass this as \`sessionId\` in a later \`raven_seek\` call to continue the same research.`
               const resultOutput = `${output}\n\n*Raven searched for ${elapsed}s — ${formatBytes(savedCandidate)} handled, ${formatTokens(savedCandidate)} tokens*\n\n${continuation}`
               addBytes(Math.max(0, savedCandidate - resultOutput.length))
-              ravenProviderIssue = undefined
+              delete ravenProviderIssues.seek
 
               return { title: "Raven Seek", metadata: { sessionId }, output: resultOutput }
             } finally {
@@ -1739,9 +2053,9 @@ Then restart opencode for the model change to take effect. If the task can be co
               : /timeout|timed.?out|session kept/i.test(msg) ? err.message
               : `Raven search failed. Proceed without search — note gaps for the user. [${err.message || err}]`
             if (!missingSession && /quota|usage.?limit|usage exceeded|free usage|subscribe to go|subscription|billing|auth|unauthorized|forbidden|401|403|api key|login|model|unavailable|down|not found|did not produce an initial response|retry dialog/i.test(msg)) {
-              ravenProviderIssue = hint
+              ravenProviderIssues.seek = hint
             }
-            const recovery = ravenProviderIssue ? `\n\n${ravenRecoveryInstructions()}` : ""
+            const recovery = ravenProviderIssues.seek ? `\n\n${ravenRecoveryInstructions("seek")}` : ""
             const continuation = sessionId && !missingSession
               ? `\n\nRaven session: \`${sessionId}\`. Pass this as \`sessionId\` in a later \`raven_seek\` call to retry or continue.`
               : ""
@@ -1750,7 +2064,17 @@ Then restart opencode for the model change to take effect. If the task can be co
         },
       }),
       "raven_mcp": tool({
-        description: "Raven-only bridge for on-demand MCP servers. Non-Raven agents must not call this directly; use raven_seek instead. Raven uses this to list and call tools/resources/prompts from MCPs configured in Raven's onDemandMcpServers without exposing their full schemas to the main model.",
+        description: "On-demand MCP information retrieval only. Creates or resumes a dedicated Raven MCP session that selects and calls MCPs configured under raven_mcp.onDemandMcpServers. Use for matching MCP capabilities, not local search, code review, auditing, implementation, planning, or general task delegation.",
+        args: {
+          query: tool.schema.string().describe("The information to retrieve and, when known, the target MCP server or capability. The calling agent retains analysis and judgment."),
+          sessionId: tool.schema.string().optional().describe("Raven MCP session ID returned by an earlier raven_mcp call. Provide it only to continue that MCP retrieval context."),
+        },
+        async execute(args, context) {
+          return executeRavenDelegation("mcp", args, context)
+        },
+      }),
+      "raven_mcp_bridge": tool({
+        description: "Internal bridge for the Raven MCP agent. Other agents must not call this tool. Lists and calls tools, resources, and prompts from configured on-demand MCP servers without globally exposing their schemas.",
         args: {
           server: tool.schema.string().describe("On-demand MCP server name from Raven config, e.g. context7, exa, grep_app, unityMCP."),
           operation: tool.schema.enum(["list_tools", "call_tool", "list_resources", "read_resource", "list_prompts", "get_prompt"]).describe("MCP operation to perform."),
@@ -1758,13 +2082,13 @@ Then restart opencode for the model change to take effect. If the task can be co
           argumentsJson: tool.schema.string().optional().describe("JSON object string with arguments for call_tool or get_prompt, e.g. {\"query\":\"latest AI news\"}. Omit for no arguments."),
         },
         async execute(args, context) {
-          if (!ravenSessions.has(context.sessionID) && sessionAgents.get(context.sessionID) !== "raven") {
-            return { title: "Raven MCP", output: "raven_mcp is only available inside Raven. Use raven_seek for MCP requests." }
+          if (ravenSessionKinds.get(context.sessionID) !== "mcp" && sessionAgents.get(context.sessionID) !== "raven-mcp") {
+            return { title: "Raven MCP Bridge", output: "raven_mcp_bridge is only available inside the Raven MCP agent. Use raven_mcp for on-demand MCP requests." }
           }
 
           const operation = args.operation as RavenMcpOperation
           const server = getOnDemandMcpServer(args.server)?.[1]
-          const timeout = server ? mcpTimeoutMs(server) : (config.timeout ?? 600) * 1000
+          const timeout = server ? mcpTimeoutMs(server) : (config.raven_mcp.timeout ?? 600) * 1000
           const requestOptions = { signal: context.abort, timeout }
           let connected = false
           let connection: McpConnection | undefined
@@ -1850,6 +2174,10 @@ Then restart opencode for the model change to take effect. If the task can be co
         sessionAgents.set(input.sessionID, input.agent)
         if (input.agent === "raven") {
           ravenSessions.add(input.sessionID)
+          ravenSessionKinds.set(input.sessionID, "seek")
+        } else if (input.agent === "raven-mcp") {
+          ravenSessions.add(input.sessionID)
+          ravenSessionKinds.set(input.sessionID, "mcp")
         }
       }
     },
@@ -1865,6 +2193,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         const sessionId = evt.properties?.info?.id
         if (sessionId) {
           ravenSessions.delete(sessionId)
+          ravenSessionKinds.delete(sessionId)
           activeRavenPrompts.delete(sessionId)
           sessionAgents.delete(sessionId)
           clearRavenWaiters(sessionId)
@@ -1920,21 +2249,15 @@ Then restart opencode for the model change to take effect. If the task can be co
       }
     },
 
-    // /raven help|on|off|route|mcp|model <name>|effort <value>|timeout <seconds>|stats|status
+    // /raven help|route|seek ...|mcp ...|update|stats|status
     async "command.execute.before"(input: any, output: any) {
       if (input.command !== "raven") return
       output.parts.length = 0
       const raw = input.arguments.trim()
       const arg = raw.toLowerCase()
 
-      if (arg === "on") {
-        updateConfig({ enabled: true })
-        output.parts.push({ type: "text", text: "Raven tool/MCP routing enabled. Non-Raven agents will be redirected to raven_seek for configured tools." })
-      } else if (arg === "help") {
+      if (arg === "help") {
         output.parts.push({ type: "text", text: helpText() })
-      } else if (arg === "off") {
-        updateConfig({ enabled: false })
-        output.parts.push({ type: "text", text: "Raven tool/MCP routing disabled. All agents can use tools directly." })
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: statsText() })
       } else if (arg === "route") {
@@ -1950,14 +2273,36 @@ Then restart opencode for the model change to take effect. If the task can be co
           output.parts.push({ type: "text", text: "Usage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>\n\nGlobal MCPs are auto-routed by detected OpenCode MCP server name." })
         } else {
           updateConfig((latest) => {
-            const values = uniqueStrings(latest[key])
+            const values = uniqueStrings(latest.raven_seek[key])
             const exists = values.some((value) => value.toLowerCase() === name.toLowerCase())
             const next = action === "add"
               ? exists ? values : [...values, name]
               : values.filter((value) => value.toLowerCase() !== name.toLowerCase())
-            return key === "routeTools" ? { routeTools: next } : { routeToolKeywords: next }
+            return { raven_seek: key === "routeTools" ? { routeTools: next } : { routeToolKeywords: next } }
           })
           output.parts.push({ type: "text", text: routeSummary() })
+        }
+      } else if (arg.startsWith("seek ")) {
+        const parts = raw.split(/\s+/)
+        const action = parts[1]?.toLowerCase()
+        const value = parts.slice(2).join(" ").trim()
+        if (action === "model" && value) {
+          updateConfig({ raven_seek: { model: value } })
+          delete ravenProviderIssues.seek
+          output.parts.push({ type: "text", text: `Raven Search model set to: ${value}\nRestart opencode for the change to take effect.` })
+        } else if (action === "effort" && value) {
+          updateConfig({ raven_seek: { reasoning_effort: value } })
+          output.parts.push({ type: "text", text: `Raven Search reasoning effort set to: ${value}\nRestart opencode for the change to take effect.` })
+        } else if (action === "timeout") {
+          const seconds = Number(value)
+          if (!Number.isInteger(seconds) || seconds < 10 || seconds > MAX_TIMEOUT_SECONDS) {
+            output.parts.push({ type: "text", text: `Usage: /raven seek timeout <seconds>\nMust be between 10 and ${MAX_TIMEOUT_SECONDS}. Current: ${config.raven_seek.timeout ?? 600}s` })
+          } else {
+            updateConfig({ raven_seek: { timeout: seconds } })
+            output.parts.push({ type: "text", text: `Raven Search timeout set to ${seconds}s. Takes effect immediately.` })
+          }
+        } else {
+          output.parts.push({ type: "text", text: "Usage:\n  /raven seek model <provider/model>\n  /raven seek effort <value>\n  /raven seek timeout <seconds>" })
         }
       } else if (arg === "mcp") {
         output.parts.push({ type: "text", text: `${onDemandMcpStatus()}\n\nUsage:\n  /raven mcp refresh [server_name]\n  /raven mcp detail full\n  /raven mcp detail minimized` })
@@ -1975,13 +2320,30 @@ Then restart opencode for the model change to take effect. If the task can be co
         } else if (action === "detail") {
           const detail = parts[2]?.toLowerCase()
           if (detail !== "full" && detail !== "minimized") {
-            output.parts.push({ type: "text", text: `Usage: /raven mcp detail full|minimized\nCurrent: ${config.onDemandMcpDescriptionDetail ?? "full"}` })
+            output.parts.push({ type: "text", text: `Usage: /raven mcp detail full|minimized\nCurrent: ${config.raven_mcp.descriptionDetail ?? "full"}` })
           } else {
-            updateConfig({ onDemandMcpDescriptionDetail: detail })
+            updateConfig({ raven_mcp: { descriptionDetail: detail } })
             output.parts.push({ type: "text", text: `On-demand MCP guidance detail set to: ${detail}\nRestart opencode for startup instructions/tool descriptions to fully refresh.` })
           }
+        } else if (action === "model" && parts.slice(2).join(" ").trim()) {
+          const model = parts.slice(2).join(" ").trim()
+          updateConfig({ raven_mcp: { model } })
+          delete ravenProviderIssues.mcp
+          output.parts.push({ type: "text", text: `Raven MCP model set to: ${model}\nRestart opencode for the change to take effect.` })
+        } else if (action === "effort" && parts.slice(2).join(" ").trim()) {
+          const effort = parts.slice(2).join(" ").trim()
+          updateConfig({ raven_mcp: { reasoning_effort: effort } })
+          output.parts.push({ type: "text", text: `Raven MCP reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
+        } else if (action === "timeout") {
+          const seconds = Number(parts[2])
+          if (!Number.isInteger(seconds) || seconds < 10 || seconds > MAX_TIMEOUT_SECONDS) {
+            output.parts.push({ type: "text", text: `Usage: /raven mcp timeout <seconds>\nMust be between 10 and ${MAX_TIMEOUT_SECONDS}. Current: ${config.raven_mcp.timeout ?? 600}s` })
+          } else {
+            updateConfig({ raven_mcp: { timeout: seconds } })
+            output.parts.push({ type: "text", text: `Raven MCP timeout set to ${seconds}s. Takes effect immediately.` })
+          }
         } else {
-          output.parts.push({ type: "text", text: "Usage:\n  /raven mcp\n  /raven mcp refresh [server_name]\n  /raven mcp detail full\n  /raven mcp detail minimized" })
+          output.parts.push({ type: "text", text: "Usage:\n  /raven mcp\n  /raven mcp refresh [server_name]\n  /raven mcp detail full|minimized\n  /raven mcp model <provider/model>\n  /raven mcp effort <value>\n  /raven mcp timeout <seconds>" })
         }
       } else if (arg === "update") {
         try {
@@ -1997,37 +2359,11 @@ Then restart opencode for the model change to take effect. If the task can be co
         } catch (err: any) {
           output.parts.push({ type: "text", text: `Raven update check failed: ${err?.message ?? err}\n\n${manualUpdateText()}` })
         }
-      } else if (arg.startsWith("model ")) {
-        const model = raw.slice(6).trim()
-        if (!model) {
-          output.parts.push({ type: "text", text: `Usage: /raven model <name>\nCurrent model: ${config.model || fm.model || "(default)"}` })
-        } else {
-          updateConfig({ model })
-          ravenProviderIssue = undefined
-          output.parts.push({ type: "text", text: `Raven model set to: ${model}\nRestart opencode for the change to take effect.` })
-        }
-      } else if (arg.startsWith("effort ")) {
-        const effort = raw.slice(7).trim()
-        if (!effort) {
-          output.parts.push({ type: "text", text: `Usage: /raven effort <value>\nCurrent: ${config.reasoning_effort || fm.reasoning_effort || "(default)"}` })
-        } else {
-          updateConfig({ reasoning_effort: effort })
-          output.parts.push({ type: "text", text: `Raven reasoning effort set to: ${effort}\nRestart opencode for the change to take effect.` })
-        }
-      } else if (arg.startsWith("timeout ")) {
-        const secs = Number(raw.slice(8).trim())
-        if (!Number.isInteger(secs) || secs < 10 || secs > MAX_TIMEOUT_SECONDS) {
-          output.parts.push({ type: "text", text: `Usage: /raven timeout <seconds>\nMust be between 10 and ${MAX_TIMEOUT_SECONDS}. Current: ${config.timeout ?? 600}s` })
-        } else {
-          updateConfig({ timeout: secs })
-          output.parts.push({ type: "text", text: `Raven timeout set to ${secs}s. Takes effect immediately.` })
-        }
       } else {
-        const enabled = config.enabled ? "enabled" : "disabled"
-        const model = config.model || fm.model || "(default)"
-        const effort = config.reasoning_effort || fm.reasoning_effort || "(default)"
-        const timeout = config.timeout ?? 600
-        const providerIssue = ravenProviderIssue ? `\nProvider issue: ${ravenProviderIssue}` : ""
+        const seek = config.raven_seek
+        const mcp = config.raven_mcp
+        const seekIssue = ravenProviderIssues.seek ? `\n  Provider issue: ${ravenProviderIssues.seek}` : ""
+        const mcpIssue = ravenProviderIssues.mcp ? `\n  Provider issue: ${ravenProviderIssues.mcp}` : ""
         let update = "Update: unable to check npm."
         try {
           const info = await getUpdateInfo()
@@ -2037,23 +2373,22 @@ Then restart opencode for the model change to take effect. If the task can be co
               ? `Update: up to date (latest ${info.latest}).`
               : "Update: unable to check npm."
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven is ${enabled}. Version: ${PACKAGE_VERSION}. Model: ${model}. Reasoning: ${effort}. Timeout: ${timeout}s${providerIssue}\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
+        output.parts.push({ type: "text", text: `Raven version: ${PACKAGE_VERSION}.\nSearch agent: ${seek.model || fm.model || "(default)"}. Reasoning: ${seek.reasoning_effort || fm.reasoning_effort || "(default)"}. Timeout: ${seek.timeout ?? 600}s.${seekIssue}\nMCP agent: ${mcp.model || mcpFm.model || "(default)"}. Reasoning: ${mcp.reasoning_effort || mcpFm.reasoning_effort || "(default)"}. Timeout: ${mcp.timeout ?? 600}s.${mcpIssue}\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
       }
     },
 
     async "tool.execute.before"(input: any, output: any) {
-      if (input.tool === "raven_seek" && (ravenSessions.has(input.sessionID) || sessionAgents.get(input.sessionID) === "raven")) {
-        throw new Error("raven_seek is disabled inside Raven. Use Raven's direct search/fetch tools instead.")
+      if ((input.tool === "raven_seek" || input.tool === "raven_mcp") && ravenSessions.has(input.sessionID)) {
+        throw new Error(`${input.tool} cannot be called from inside a Raven agent. Use that agent's direct tools instead.`)
       }
 
-      if (input.tool === "raven_mcp" && !ravenSessions.has(input.sessionID) && sessionAgents.get(input.sessionID) !== "raven") {
-        throw new Error("raven_mcp is only available inside Raven. Use raven_seek(query=\"Use the relevant on-demand MCP to handle this request\") instead.")
+      if (input.tool === "raven_mcp_bridge" && ravenSessionKinds.get(input.sessionID) !== "mcp" && sessionAgents.get(input.sessionID) !== "raven-mcp") {
+        throw new Error("raven_mcp_bridge is only available inside the Raven MCP agent. Use raven_mcp for on-demand MCP requests.")
       }
 
-      if (!config.enabled) return
       if (ravenSessions.has(input.sessionID)) return
       if (isExcluded(sessionAgents.get(input.sessionID))) return
-      if (config.excludeTools?.some((name) => name.toLowerCase() === input.tool.toLowerCase())) return
+      if (config.raven_seek.excludeTools?.some((name) => name.toLowerCase() === input.tool.toLowerCase())) return
 
       if (input.tool === "task" && output.args?.subagent_type === "raven") {
         ravenTaskCalls.add(input.callID)

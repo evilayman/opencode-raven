@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -7,12 +7,18 @@ import RavenPlugin from "../index"
 const originalUserProfile = process.env.USERPROFILE
 const testHome = join(tmpdir(), `opencode-raven-test-${process.pid}`)
 const ravenLog = join(tmpdir(), "raven-sessions.log")
+const ravenConfigDir = join(testHome, ".config", "opencode", "opencode-raven")
+const ravenConfigFile = join(ravenConfigDir, "raven-config.json")
 let originalRavenLog: Buffer | undefined
 
 beforeAll(() => {
   if (existsSync(ravenLog)) originalRavenLog = readFileSync(ravenLog)
   mkdirSync(testHome, { recursive: true })
   process.env.USERPROFILE = testHome
+})
+
+beforeEach(() => {
+  rmSync(ravenConfigDir, { recursive: true, force: true })
 })
 
 afterAll(() => {
@@ -57,6 +63,79 @@ async function ravenSeek(client: any) {
   return (hooks.tool as any).raven_seek
 }
 
+async function ravenMcp(client: any) {
+  const hooks = await RavenPlugin(pluginInput(client))
+  return { hooks, mcp: (hooks.tool as any).raven_mcp }
+}
+
+describe("Raven configuration migration", () => {
+  test("migrates the flat config into separate search and MCP sections", async () => {
+    mkdirSync(ravenConfigDir, { recursive: true })
+    writeFileSync(ravenConfigFile, JSON.stringify({
+      enabled: false,
+      model: "provider/legacy",
+      reasoning_effort: "high",
+      ravenInstructions: "legacy instructions",
+      routeTools: ["grep"],
+      routeToolKeywords: ["docs"],
+      excludeAgents: ["explore"],
+      excludeTools: ["glob"],
+      timeout: 321,
+      onDemandMcpDescriptionDetail: "minimized",
+      onDemandMcpServers: {
+        privateDocs: { type: "remote", url: "https://example.com/mcp", headers: { Authorization: "secret" } },
+      },
+      stats: { bytes: 42 },
+    }))
+
+    await RavenPlugin(pluginInput({ session: {} }))
+
+    const migrated = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
+    expect(migrated.enabled).toBeUndefined()
+    expect(migrated.model).toBeUndefined()
+    expect(migrated.raven_seek).toMatchObject({
+      model: "provider/legacy",
+      reasoning_effort: "high",
+      instructions: "legacy instructions",
+      routeTools: ["grep"],
+      routeToolKeywords: ["docs"],
+      excludeAgents: ["explore"],
+      excludeTools: ["glob"],
+      timeout: 321,
+    })
+    expect(migrated.raven_mcp).toMatchObject({
+      model: "provider/legacy",
+      reasoning_effort: "high",
+      instructions: "legacy instructions",
+      timeout: 321,
+      descriptionDetail: "minimized",
+    })
+    expect(migrated.raven_mcp.onDemandMcpServers.privateDocs.headers.Authorization).toBe("secret")
+    expect(migrated.stats).toEqual({ bytes: 42 })
+  })
+
+  test("registers separate configured models and permissions for both agents", async () => {
+    mkdirSync(ravenConfigDir, { recursive: true })
+    writeFileSync(ravenConfigFile, JSON.stringify({
+      raven_seek: { model: "provider/search", reasoning_effort: "medium" },
+      raven_mcp: { model: "provider/mcp", reasoning_effort: "high", onDemandMcpServers: {} },
+    }))
+    const hooks = await RavenPlugin(pluginInput({ session: {} }))
+    const config: any = { mcp: {}, instructions: [] }
+
+    await hooks.config!(config)
+
+    expect(config.agent.raven.model).toBe("provider/search")
+    expect(config.agent.raven.options.reasoning_effort).toBe("medium")
+    expect(config.agent["raven-mcp"].model).toBe("provider/mcp")
+    expect(config.agent["raven-mcp"].options.reasoning_effort).toBe("high")
+    expect(config.agent.raven.permission.raven_mcp_bridge).toBe("deny")
+    expect(config.agent["raven-mcp"].permission["*"]).toBe("deny")
+    expect(config.agent["raven-mcp"].permission.raven_mcp_bridge).toBe("allow")
+    await hooks.dispose?.()
+  })
+})
+
 describe("raven_seek session continuation", () => {
   test("creates a new Raven session and returns its continuation handle", async () => {
     const create = mock(async () => ({ data: { id: "ses_new" } }))
@@ -74,6 +153,25 @@ describe("raven_seek session continuation", () => {
     expect(metadata).toHaveBeenCalledWith({ metadata: { sessionId: "ses_new" } })
     expect(result.metadata).toEqual({ sessionId: "ses_new" })
     expect(result.output).toContain("Raven session: `ses_new`")
+  })
+
+  test("attaches a nested caller's Raven session directly to the root", async () => {
+    const get = mock(async ({ path }: any) => ({
+      data: path.id === "ses_parent"
+        ? { id: "ses_parent", parentID: "ses_root", projectID: "project-1" }
+        : { id: "ses_root", projectID: "project-1" },
+    }))
+    const create = mock(async () => ({ data: { id: "ses_new" } }))
+    const prompt = mock(async () => ({ data: { parts: [{ type: "text", text: "Root-visible result" }] } }))
+    const messages = mock(async () => ({ data: [] }))
+    const seek = await ravenSeek({ session: { get, create, prompt, messages } })
+    const { context } = toolContext()
+
+    await seek.execute({ query: "Find evidence" }, context)
+
+    expect(get).toHaveBeenCalledTimes(2)
+    expect((create.mock.calls[0] as any)[0].body.parentID).toBe("ses_root")
+    expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven")
   })
 
   test("continues a validated Raven child without creating another session", async () => {
@@ -101,7 +199,7 @@ describe("raven_seek session continuation", () => {
     const result = await seek.execute({ query: "Now compare them", sessionId: "ses_existing" }, context)
 
     expect(create).not.toHaveBeenCalled()
-    expect(get).toHaveBeenCalledTimes(1)
+    expect(get).toHaveBeenCalledTimes(2)
     expect((messages.mock.calls[0] as any)[0].query).toBeUndefined()
     expect((prompt.mock.calls[0] as any)[0].path.id).toBe("ses_existing")
     expect(result.metadata).toEqual({ sessionId: "ses_existing" })
@@ -197,5 +295,61 @@ describe("raven_seek session continuation", () => {
       routeError = err as Error
     }
     expect(routeError?.message).toContain("next tool call should be raven_seek")
+  })
+})
+
+describe("Raven MCP delegation", () => {
+  test("uses the dedicated MCP agent and root-level parent", async () => {
+    const get = mock(async ({ path }: any) => ({
+      data: path.id === "ses_parent"
+        ? { id: "ses_parent", parentID: "ses_root", projectID: "project-1" }
+        : { id: "ses_root", projectID: "project-1" },
+    }))
+    const create = mock(async () => ({ data: { id: "ses_mcp" } }))
+    const prompt = mock(async () => ({ data: { parts: [{ type: "text", text: "MCP result" }] } }))
+    const messages = mock(async () => ({ data: [] }))
+    const { mcp } = await ravenMcp({ session: { get, create, prompt, messages } })
+    const { context } = toolContext()
+
+    const result = await mcp.execute({ query: "Use Context7 for current docs" }, context)
+
+    expect((create.mock.calls[0] as any)[0].body.parentID).toBe("ses_root")
+    expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven-mcp")
+    expect(result.output).toContain("later `raven_mcp` call")
+  })
+
+  test("blocks the internal bridge outside the MCP agent", async () => {
+    const { hooks } = await ravenMcp({ session: {} })
+    let error: Error | undefined
+
+    try {
+      await (hooks as any)["tool.execute.before"](
+        { tool: "raven_mcp_bridge", sessionID: "ses_parent", callID: "call_bridge" },
+        { args: { server: "context7", operation: "list_tools" } },
+      )
+    } catch (caught) {
+      error = caught as Error
+    }
+
+    expect(error?.message).toContain("only available inside the Raven MCP agent")
+  })
+
+  test("rejects a search-agent session passed to raven_mcp", async () => {
+    const get = mock(async ({ path }: any) => ({
+      data: path.id === "ses_parent"
+        ? { id: "ses_parent", projectID: "project-1" }
+        : { id: "ses_search", parentID: "ses_parent", projectID: "project-1" },
+    }))
+    const messages = mock(async () => ({
+      data: [{ info: { role: "user", agent: "raven" }, parts: [] }],
+    }))
+    const prompt = mock(async () => ({ data: { parts: [] } }))
+    const { mcp } = await ravenMcp({ session: { get, messages, prompt } })
+    const { context } = toolContext()
+
+    const result = await mcp.execute({ query: "Continue", sessionId: "ses_search" }, context)
+
+    expect(prompt).not.toHaveBeenCalled()
+    expect(result.output).toContain("does not belong to the raven-mcp agent")
   })
 })
