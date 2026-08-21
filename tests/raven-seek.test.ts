@@ -59,16 +59,126 @@ function toolContext() {
 }
 
 async function ravenSeek(client: any) {
+  mkdirSync(ravenConfigDir, { recursive: true })
+  writeFileSync(ravenConfigFile, JSON.stringify({
+    raven_seek: { model: "provider/search" },
+    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+  }))
   const hooks = await RavenPlugin(pluginInput(client))
   return (hooks.tool as any).raven_seek
 }
 
 async function ravenMcp(client: any) {
+  mkdirSync(ravenConfigDir, { recursive: true })
+  writeFileSync(ravenConfigFile, JSON.stringify({
+    raven_seek: { model: "provider/search" },
+    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+  }))
   const hooks = await RavenPlugin(pluginInput(client))
   return { hooks, mcp: (hooks.tool as any).raven_mcp }
 }
 
 describe("Raven configuration migration", () => {
+  test("auto-selects the newest active free OpenCode model with tool support", async () => {
+    const list = mock(async () => ({
+      data: {
+        connected: ["opencode"],
+        all: [{
+          id: "opencode",
+          models: {
+            paid: { id: "paid", status: "active", release_date: "2026-08-20", tool_call: true, cost: { input: 1, output: 1 }, limit: { context: 200000 } },
+            oldFree: { id: "old-free", status: "active", release_date: "2026-01-01", tool_call: true, cost: { input: 0, output: 0 }, limit: { context: 100000 } },
+            noTools: { id: "newer-free", status: "active", release_date: "2026-08-21", tool_call: false, cost: { input: 0, output: 0 }, limit: { context: 300000 } },
+            selected: { id: "selected-free", status: "active", release_date: "2026-08-01", tool_call: true, cost: { input: 0, output: 0 }, limit: { context: 200000 } },
+          },
+        }],
+      },
+    }))
+
+    const hooks = await RavenPlugin(pluginInput({ provider: { list }, session: {} }))
+    const initialConfig: any = { mcp: {}, instructions: [] }
+    await hooks.config!(initialConfig)
+    expect(initialConfig.agent.raven.disable).toBe(true)
+    expect(list).not.toHaveBeenCalled()
+    await hooks.event!({ event: { type: "test.ready" } } as any)
+    const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
+    expect(saved.raven_seek).toMatchObject({ model: "opencode/selected-free", autoSelectedModel: "opencode/selected-free" })
+    expect(saved.raven_mcp).toMatchObject({ model: "opencode/selected-free", autoSelectedModel: "opencode/selected-free" })
+    await hooks.dispose?.()
+
+    const restarted = await RavenPlugin(pluginInput({ provider: { list }, session: {} }))
+    const config: any = { mcp: {}, instructions: [] }
+    await restarted.config!(config)
+    expect(config.agent.raven.model).toBe("opencode/selected-free")
+    expect(config.agent.raven.disable).toBe(false)
+    expect(config.agent["raven-mcp"].model).toBe("opencode/selected-free")
+    expect(list).toHaveBeenCalledTimes(1)
+    await restarted.dispose?.()
+  })
+
+  test("keeps routing inactive when no free tool-capable model is available", async () => {
+    const list = mock(async () => ({
+      data: {
+        connected: ["opencode"],
+        all: [{
+          id: "opencode",
+          models: {
+            paid: { id: "paid", status: "active", tool_call: true, cost: { input: 1, output: 1 }, limit: { context: 200000 } },
+          },
+        }],
+      },
+    }))
+    const hooks = await RavenPlugin(pluginInput({ provider: { list }, session: {} }))
+    const config: any = { mcp: {}, instructions: [] }
+    await hooks.config!(config)
+    expect(list).not.toHaveBeenCalled()
+    await hooks.event!({ event: { type: "test.ready" } } as any)
+    const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
+    expect(saved.raven_seek.model).toBeUndefined()
+    expect(saved.raven_mcp.model).toBeUndefined()
+
+    await (hooks as any)["tool.execute.before"](
+      { tool: "grep", sessionID: "ses_parent", callID: "call_1" },
+      { args: { pattern: "direct while unconfigured" } },
+    )
+    const result = await (hooks.tool as any).raven_seek.execute({ query: "search" }, toolContext().context)
+    expect(result.output).toContain("Raven setup required")
+    expect(result.output).toContain("/raven seek model <provider/model>")
+    await hooks.dispose?.()
+  })
+
+  test("replaces the retired default but preserves manually configured models", async () => {
+    mkdirSync(ravenConfigDir, { recursive: true })
+    writeFileSync(ravenConfigFile, JSON.stringify({
+      raven_seek: { model: "opencode/deepseek-v4-flash-free" },
+      raven_mcp: { model: "provider/manual", onDemandMcpServers: {} },
+    }))
+    const list = mock(async () => ({
+      data: {
+        connected: ["opencode"],
+        all: [{
+          id: "opencode",
+          models: {
+            replacement: { id: "replacement-free", status: "active", tool_call: true, cost: { input: 0, output: 0 }, limit: { context: 100000 } },
+          },
+        }],
+      },
+    }))
+
+    const hooks = await RavenPlugin(pluginInput({ provider: { list }, session: {} }))
+    const config: any = { mcp: {}, instructions: [] }
+    await hooks.config!(config)
+    expect(config.agent.raven.disable).toBe(true)
+    expect(config.agent["raven-mcp"].model).toBe("provider/manual")
+    await hooks.event!({ event: { type: "test.ready" } } as any)
+    const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
+    expect(saved.raven_seek.model).toBe("opencode/replacement-free")
+    expect(saved.raven_seek.autoSelectedModel).toBe("opencode/replacement-free")
+    expect(saved.raven_mcp.model).toBe("provider/manual")
+    expect(saved.raven_mcp.autoSelectedModel).toBeUndefined()
+    await hooks.dispose?.()
+  })
+
   test("migrates the flat config into separate search and MCP sections", async () => {
     mkdirSync(ravenConfigDir, { recursive: true })
     writeFileSync(ravenConfigFile, JSON.stringify({
@@ -273,6 +383,11 @@ describe("raven_seek session continuation", () => {
   })
 
   test("surfaces SDK prompt error envelopes instead of reporting an empty success", async () => {
+    mkdirSync(ravenConfigDir, { recursive: true })
+    writeFileSync(ravenConfigFile, JSON.stringify({
+      raven_seek: { model: "provider/search" },
+      raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+    }))
     const create = mock(async () => ({ data: { id: "ses_deleted" } }))
     const prompt = mock(async () => ({
       error: { name: "NotFoundError", data: { message: "Session not found" } },

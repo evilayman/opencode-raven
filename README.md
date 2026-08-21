@@ -37,9 +37,24 @@ Raven requires OpenCode 1.15.12 or newer. Add it to `opencode.jsonc`:
 }
 ```
 
-Restart OpenCode, then run `/raven` to verify the loaded version, model, routing, MCP health, and estimated savings.
+Restart OpenCode, then run `/raven` to verify the loaded version, model, routing, MCP health, and estimated savings. A fresh install may ask for one additional restart after selecting its model.
 
 OpenCode resolves the package from npm and caches it automatically.
+
+### First-Time Setup
+
+On first start, Raven checks OpenCode's connected provider catalog and automatically selects an available zero-cost, tool-capable model from the `opencode` provider for both Raven agents. Free-model availability is controlled by the provider and can change.
+
+If a free model is found, Raven writes it to the config and asks you to restart OpenCode once to load it. After restarting, `/raven` shows it with `(auto)`. Raven rechecks auto-selected models after startup and replaces one only when it is no longer available. A model you set manually is never replaced.
+
+If no suitable free model is available, Raven shows a setup warning and leaves search routing inactive rather than silently using a paid model. Open OpenCode's model picker to choose an available model, then run:
+
+```txt
+/raven seek model <provider/model>
+/raven mcp model <provider/model>
+```
+
+Restart OpenCode afterward. You can retry free-model detection at any time with `/raven seek model auto` and `/raven mcp model auto`.
 
 ## Example
 
@@ -95,7 +110,8 @@ Manual edits require an OpenCode restart. Route and timeout commands apply immed
 
 | Field | Fresh-install default | Description |
 |-------|-----------------------|-------------|
-| `raven_seek.model` | From `Raven.md` | Search-agent model override. |
+| `raven_seek.model` | Auto-detected free OpenCode model, otherwise unset | Search-agent model. Manual values are preserved. |
+| `raven_seek.autoSelectedModel` | Managed by Raven | Tracks whether the Search model can be safely refreshed automatically. |
 | `raven_seek.reasoning_effort` | `low` | Search-agent reasoning option. |
 | `raven_seek.instructions` | `""` | Extra search-agent instructions. |
 | `raven_seek.routeTools` | Search/fetch tools plus `bash` | Exact tools routed through Raven Search. |
@@ -103,7 +119,8 @@ Manual edits require an OpenCode restart. Route and timeout commands apply immed
 | `raven_seek.excludeAgents` | `[]` | Agents allowed to bypass search routing. |
 | `raven_seek.excludeTools` | `[]` | Exact tools never routed through Raven Search. |
 | `raven_seek.timeout` | `600` | Search delegation timeout in seconds. |
-| `raven_mcp.model` | From `RavenMcp.md` | MCP-agent model override. |
+| `raven_mcp.model` | Auto-detected free OpenCode model, otherwise unset | MCP-agent model. Manual values are preserved. |
+| `raven_mcp.autoSelectedModel` | Managed by Raven | Tracks whether the MCP model can be safely refreshed automatically. |
 | `raven_mcp.reasoning_effort` | `low` | MCP-agent reasoning option. |
 | `raven_mcp.instructions` | `""` | Extra MCP-agent instructions. |
 | `raven_mcp.timeout` | `600` | MCP delegation and fallback connection timeout in seconds. |
@@ -195,10 +212,10 @@ When `bash` is routed, Raven intercepts primary discovery commands such as `rg`,
 | `/raven mcp` | Show on-demand MCP health and generated metadata. |
 | `/raven mcp refresh [server]` | Recheck MCP health and regenerate metadata. |
 | `/raven mcp detail full|minimized` | Set generated guidance detail; restart afterward. |
-| `/raven seek model <provider/model>` | Change the search model; restart afterward. |
+| `/raven seek model <provider/model>\|auto` | Change or auto-detect the search model; restart afterward. |
 | `/raven seek effort <value>` | Change search reasoning effort; restart afterward. |
 | `/raven seek timeout <seconds>` | Change the search delegation timeout. |
-| `/raven mcp model <provider/model>` | Change the MCP model; restart afterward. |
+| `/raven mcp model <provider/model>\|auto` | Change or auto-detect the MCP model; restart afterward. |
 | `/raven mcp effort <value>` | Change MCP reasoning effort; restart afterward. |
 | `/raven mcp timeout <seconds>` | Change the MCP delegation timeout. |
 | `/raven stats` | Show estimated context avoided. |
@@ -223,6 +240,7 @@ Review `Raven.md` and your MCP commands before using Raven in sensitive environm
 
 ## Troubleshooting
 
+- First-time model warning: select a model in OpenCode's model picker, run `/raven seek model <provider/model>` and `/raven mcp model <provider/model>`, then restart. Use `auto` as the model value to retry free-model detection.
 - Search provider or quota failure: run `/raven seek model <provider/model>`, then restart OpenCode.
 - MCP-agent provider or quota failure: run `/raven mcp model <provider/model>`, then restart OpenCode.
 - MCP failure: run `/raven mcp`, then `/raven mcp refresh <server>` after correcting its URL, command, environment, or credentials.

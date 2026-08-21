@@ -64,6 +64,7 @@ const DEFAULT_ON_DEMAND_MCP_METADATA: Record<string, OnDemandMcpMetadata> = {
 }
 
 const NEVER_ROUTE_TOOLS = new Set(["raven_seek", "raven_mcp", "raven_mcp_bridge", "task", "subtask"])
+const RETIRED_DEFAULT_MODELS = new Set(["opencode/deepseek-v4-flash-free"])
 const MAX_TIMER_MS = 2_147_483_647
 const MAX_TIMEOUT_SECONDS = Math.floor(MAX_TIMER_MS / 1000)
 
@@ -217,6 +218,7 @@ type RavenMcpOperation = "list_tools" | "call_tool" | "list_resources" | "read_r
 
 interface RavenSeekConfig {
   model?: string
+  autoSelectedModel?: string
   reasoning_effort?: string
   instructions?: string
   routeTools?: string[]
@@ -228,6 +230,7 @@ interface RavenSeekConfig {
 
 interface RavenMcpConfig {
   model?: string
+  autoSelectedModel?: string
   reasoning_effort?: string
   instructions?: string
   timeout?: number
@@ -469,6 +472,7 @@ export default (async (input: PluginInput) => {
     const normalized: RavenConfig = {
       raven_seek: {
         model: typeof seekSource.model === "string" ? seekSource.model : DEFAULT_CONFIG.raven_seek.model,
+        autoSelectedModel: typeof seekSource.autoSelectedModel === "string" ? seekSource.autoSelectedModel : undefined,
         reasoning_effort: typeof seekSource.reasoning_effort === "string" ? seekSource.reasoning_effort : DEFAULT_CONFIG.raven_seek.reasoning_effort,
         instructions: typeof seekSource.instructions === "string" ? seekSource.instructions : legacyInstructions ?? "",
         routeTools: uniqueStrings(seekSource.routeTools, DEFAULT_ROUTE_TOOLS),
@@ -482,6 +486,7 @@ export default (async (input: PluginInput) => {
       },
       raven_mcp: {
         model: typeof mcpSource.model === "string" ? mcpSource.model : DEFAULT_CONFIG.raven_mcp.model,
+        autoSelectedModel: typeof mcpSource.autoSelectedModel === "string" ? mcpSource.autoSelectedModel : undefined,
         reasoning_effort: typeof mcpSource.reasoning_effort === "string" ? mcpSource.reasoning_effort : DEFAULT_CONFIG.raven_mcp.reasoning_effort,
         instructions: typeof mcpSource.instructions === "string" ? mcpSource.instructions : legacyInstructions ?? "",
         timeout: typeof mcpSource.timeout === "number" && Number.isFinite(mcpSource.timeout)
@@ -556,6 +561,7 @@ export default (async (input: PluginInput) => {
   }
 
   let config = loadConfig()
+  let modelDiscoveryError: string | undefined
 
   function updateConfig(update: Partial<RavenConfig> | ((latest: RavenConfig) => Partial<RavenConfig>)): RavenConfig {
     try {
@@ -581,6 +587,114 @@ export default (async (input: PluginInput) => {
     }
     return config
   }
+
+  function modelsNeedingDiscovery(): boolean {
+    return [config.raven_seek, config.raven_mcp].some((section) =>
+      !section.model || RETIRED_DEFAULT_MODELS.has(section.model) || section.autoSelectedModel === section.model
+    )
+  }
+
+  function freeOpenCodeModels(providers: any[], connected?: string[]): string[] {
+    const connectedProviders = Array.isArray(connected) ? new Set(connected.map((id) => String(id).toLowerCase())) : undefined
+    const candidates: Array<{ id: string; status: number; released: number; context: number }> = []
+    for (const provider of providers) {
+      if (String(provider?.id ?? "").toLowerCase() !== "opencode") continue
+      if (connectedProviders && !connectedProviders.has("opencode")) continue
+      for (const [key, model] of Object.entries(provider?.models ?? {}) as Array<[string, any]>) {
+        const id = String(model?.id ?? key).trim()
+        const cost = model?.cost
+        const free = (Number(cost?.input) === 0 && Number(cost?.output) === 0) || /(?:^|-)free$/i.test(id)
+        const toolCall = model?.tool_call ?? model?.capabilities?.toolcall
+        if (!id || !free || toolCall !== true || model?.status === "deprecated") continue
+        const fullId = id.includes("/") ? id : `opencode/${id}`
+        const status = model?.status === "active" ? 3 : model?.status === "beta" || !model?.status ? 2 : 1
+        const released = Date.parse(model?.release_date ?? model?.releaseDate ?? "") || 0
+        const context = Number(model?.limit?.context) || 0
+        candidates.push({ id: fullId, status, released, context })
+      }
+    }
+    candidates.sort((left, right) =>
+      right.status - left.status || right.released - left.released || right.context - left.context || left.id.localeCompare(right.id)
+    )
+    return [...new Set(candidates.map((candidate) => candidate.id))]
+  }
+
+  async function discoverFreeOpenCodeModels(): Promise<string[] | undefined> {
+    modelDiscoveryError = undefined
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 3000)
+    let lastError: unknown
+    try {
+      if ((client as any).provider?.list) {
+        try {
+          const response = await (client as any).provider.list({ query: { directory: input.directory }, signal: controller.signal })
+          const data = response?.data ?? response
+          if (Array.isArray(data?.all)) return freeOpenCodeModels(data.all, data.connected)
+        } catch (error) {
+          lastError = error
+        }
+      }
+      if ((client as any).config?.providers) {
+        try {
+          const response = await (client as any).config.providers({ query: { directory: input.directory }, signal: controller.signal })
+          const data = response?.data ?? response
+          if (Array.isArray(data?.providers)) return freeOpenCodeModels(data.providers)
+        } catch (error) {
+          lastError = error
+        }
+      }
+      modelDiscoveryError = lastError ? truncateText((lastError as any)?.message ?? lastError, 240) : "OpenCode's provider catalog was unavailable"
+      return undefined
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function ensureRavenModels(): Promise<boolean> {
+    if (!modelsNeedingDiscovery()) return false
+    const available = await discoverFreeOpenCodeModels()
+    const availableSet = new Set(available ?? [])
+    const selected = available?.[0]
+
+    function resolve(section: RavenSeekConfig | RavenMcpConfig) {
+      const current = section.model
+      const retired = !!current && RETIRED_DEFAULT_MODELS.has(current)
+      const managed = !!current && section.autoSelectedModel === current
+      if (available === undefined) {
+        return retired ? { model: undefined, autoSelectedModel: undefined } : { model: current, autoSelectedModel: section.autoSelectedModel }
+      }
+      if (!current || retired || (managed && !availableSet.has(current))) {
+        return { model: selected, autoSelectedModel: selected }
+      }
+      return { model: current, autoSelectedModel: section.autoSelectedModel }
+    }
+
+    const seek = resolve(config.raven_seek)
+    const mcp = resolve(config.raven_mcp)
+    if (seek.model !== config.raven_seek.model || seek.autoSelectedModel !== config.raven_seek.autoSelectedModel
+      || mcp.model !== config.raven_mcp.model || mcp.autoSelectedModel !== config.raven_mcp.autoSelectedModel) {
+      updateConfig({ raven_seek: seek, raven_mcp: mcp })
+      return true
+    }
+    return false
+  }
+
+  function clearRetiredDefaults() {
+    const seekRetired = !!config.raven_seek.model && RETIRED_DEFAULT_MODELS.has(config.raven_seek.model)
+    const mcpRetired = !!config.raven_mcp.model && RETIRED_DEFAULT_MODELS.has(config.raven_mcp.model)
+    if (!seekRetired && !mcpRetired) return
+    updateConfig({
+      ...(seekRetired ? { raven_seek: { model: undefined, autoSelectedModel: undefined } } : {}),
+      ...(mcpRetired ? { raven_mcp: { model: undefined, autoSelectedModel: undefined } } : {}),
+    })
+  }
+
+  clearRetiredDefaults()
+  const activeSeekModel = config.raven_seek.model
+  const activeMcpModel = config.raven_mcp.model
+  let modelRefreshPending = modelsNeedingDiscovery()
+  let modelRefreshPromise: Promise<void> | undefined
+
   let mcpMetadata = loadMcpMetadata()
   type DelegationKind = "seek" | "mcp"
   const ravenSessions = new Set<string>()
@@ -598,12 +712,23 @@ export default (async (input: PluginInput) => {
   let updateToastPending = false
   let mcpFailureToastPending = false
   let duplicateMcpToastPending = false
+  let modelSetupToastPending = false
   let mcpRefreshScheduled = false
   let mcpRefreshPromise: Promise<{ refreshed: string[]; failed: string[] }> | undefined
   let mcpRefreshQueue: Promise<unknown> = Promise.resolve()
   const mcpRefreshControllers = new Set<AbortController>()
   let lastNotifiedMcpFailureKey = ""
   const ravenProviderIssues: Partial<Record<DelegationKind, string>> = {}
+
+  async function refreshModelsIfPending() {
+    if (modelRefreshPromise) return modelRefreshPromise
+    if (!modelRefreshPending) return
+    modelRefreshPending = false
+    modelRefreshPromise = ensureRavenModels().then(() => {
+      modelSetupToastPending = !!modelSetupInstructions()
+    })
+    return modelRefreshPromise
+  }
 
   // Replace generated instructions from older releases before OpenCode consumes them.
   saveDynamicGuidance()
@@ -631,6 +756,7 @@ export default (async (input: PluginInput) => {
   }
 
   function isRouteConfigured(toolName: string): boolean {
+    if (!modelOperational("seek")) return false
     const tool = toolName.toLowerCase()
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
     if (config.raven_seek.routeTools?.some((name) => name.toLowerCase() === tool)) return true
@@ -687,11 +813,47 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function routeSummary(): string {
+    if (!modelOperational("seek")) return "Raven routing: inactive until the configured Search model is loaded."
     const tools = config.raven_seek.routeTools?.length ? config.raven_seek.routeTools.join(", ") : "(none)"
     const mcps = globalMcpServers.length ? `${globalMcpServers.join(", ")} (auto-detected)` : "none detected"
     const keywords = config.raven_seek.routeToolKeywords?.length ? config.raven_seek.routeToolKeywords.join(", ") : "(none)"
     const duplicates = duplicateMcpServers.length ? `\n  Duplicate MCP config: ${duplicateMcpServers.join(", ")} (configured globally and on-demand)` : ""
     return `Raven routing:\n  Routed tools: ${tools}\n  Routed global MCPs: ${mcps}\n  Routed tool keywords: ${keywords}${duplicates}`
+  }
+
+  function modelSetupInstructions(kind?: DelegationKind): string {
+    const unavailable = [
+      ...(!modelOperational("seek") && kind !== "mcp" ? ["seek"] : []),
+      ...(!modelOperational("mcp") && kind !== "seek" ? ["mcp"] : []),
+    ] as DelegationKind[]
+    if (!unavailable.length) return ""
+    const pendingRestart = unavailable.filter((item) => item === "seek" ? !!config.raven_seek.model : !!config.raven_mcp.model)
+    const missing = unavailable.filter((item) => item === "seek" ? !config.raven_seek.model : !config.raven_mcp.model)
+    const lines: string[] = []
+    if (pendingRestart.length) {
+      const models = pendingRestart.map((item) => `${item === "seek" ? "Search" : "MCP"}: ${item === "seek" ? modelLabel(config.raven_seek) : modelLabel(config.raven_mcp)}`)
+      lines.push(`Raven model update ready (${models.join(", ")}). Restart OpenCode to load it.`)
+    }
+    if (!missing.length) return lines.join("\n")
+    const reason = modelDiscoveryError
+      ? `Automatic free-model detection failed: ${modelDiscoveryError}.`
+      : "No connected, zero-cost OpenCode model with tool support was detected."
+    const commands = missing.map((item) => item === "seek"
+      ? "  /raven seek model <provider/model>"
+      : "  /raven mcp model <provider/model>")
+    lines.push(`Raven setup required. ${reason}\nOpen OpenCode's model picker to choose an available model, then run:\n${commands.join("\n")}\nRestart OpenCode afterward. To retry automatic detection, replace <provider/model> with auto.`)
+    return lines.join("\n\n")
+  }
+
+  function modelOperational(kind: DelegationKind): boolean {
+    const active = kind === "seek" ? activeSeekModel : activeMcpModel
+    const configured = kind === "seek" ? config.raven_seek.model : config.raven_mcp.model
+    return !!active && active === configured
+  }
+
+  function modelLabel(section: RavenSeekConfig | RavenMcpConfig): string {
+    if (!section.model) return "(not configured)"
+    return section.autoSelectedModel === section.model ? `${section.model} (auto)` : section.model
   }
 
   function mcpSummary(): string {
@@ -1306,7 +1468,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function helpText(): string {
-    return `Raven commands:\n  /raven help - show this help\n  /raven route - show or edit routed tools/keywords\n  /raven seek model <name> - change the search model (requires restart)\n  /raven seek effort <value> - change search reasoning effort (requires restart)\n  /raven seek timeout <seconds> - change search timeout\n  /raven mcp - show on-demand MCP metadata\n  /raven mcp refresh [server] - refresh MCP metadata\n  /raven mcp detail full|minimized - change MCP guidance detail\n  /raven mcp model <name> - change the MCP model (requires restart)\n  /raven mcp effort <value> - change MCP reasoning effort (requires restart)\n  /raven mcp timeout <seconds> - change MCP delegation timeout\n  /raven update - check for an update\n  /raven stats - show context saved`
+    return `Raven commands:\n  /raven help - show this help\n  /raven route - show or edit routed tools/keywords\n  /raven seek model <provider/model>|auto - change or auto-detect the search model (requires restart)\n  /raven seek effort <value> - change search reasoning effort (requires restart)\n  /raven seek timeout <seconds> - change search timeout\n  /raven mcp - show on-demand MCP metadata\n  /raven mcp refresh [server] - refresh MCP metadata\n  /raven mcp detail full|minimized - change MCP guidance detail\n  /raven mcp model <provider/model>|auto - change or auto-detect the MCP model (requires restart)\n  /raven mcp effort <value> - change MCP reasoning effort (requires restart)\n  /raven mcp timeout <seconds> - change MCP delegation timeout\n  /raven update - check for an update\n  /raven stats - show context saved`
   }
 
   function formatMcpList(title: string, items: any[], fields: string[] = ["name", "description"]): string {
@@ -1533,6 +1695,25 @@ Then restart opencode for the model change to take effect. If the task can be co
     } catch { /* duplicate MCP notifications are best-effort */ }
   }
 
+  async function notifyIfModelSetupRequired() {
+    const message = modelSetupInstructions()
+    if (!message) return
+    const updateReady = (!!config.raven_seek.model && activeSeekModel !== config.raven_seek.model)
+      || (!!config.raven_mcp.model && activeMcpModel !== config.raven_mcp.model)
+    try {
+      await (client as any).tui?.showToast?.({
+        body: {
+          title: updateReady ? "Raven model selected" : "Raven first-time setup",
+          message: updateReady
+            ? "A free Raven model was selected. Restart OpenCode to load it."
+            : "No free Raven model was detected. Run /raven for setup instructions; routing is inactive until configured.",
+          variant: updateReady ? "info" : "warning",
+          duration: 15000,
+        },
+      })
+    } catch { /* model setup remains visible in /raven */ }
+  }
+
   function delegationAgent(kind: DelegationKind): "raven" | "raven-mcp" {
     return kind === "mcp" ? "raven-mcp" : "raven"
   }
@@ -1576,6 +1757,10 @@ Then restart opencode for the model change to take effect. If the task can be co
     const agent = delegationAgent(kind)
     const toolName = delegationToolName(kind)
     const title = delegationTitle(kind)
+    await refreshModelsIfPending()
+    if (!modelOperational(kind)) {
+      return { title, output: modelSetupInstructions(kind) }
+    }
     const timeout = (kind === "mcp" ? config.raven_mcp.timeout : config.raven_seek.timeout) ?? 600
     const timeoutMs = timeout * 1000
     let sessionId: string | undefined
@@ -1815,11 +2000,14 @@ Then restart opencode for the model change to take effect. If the task can be co
 
       // Register Raven from Raven.md, with config file overrides
       configInput.agent = configInput.agent || {}
+      const seekModel = activeSeekModel || fm.model
+      const mcpModel = activeMcpModel || mcpFm.model
       configInput.agent.raven = {
         description: fm.description || "",
         mode: fm.mode || "subagent",
         hidden: fm.hidden !== undefined ? fm.hidden : false,
-        model: config.raven_seek.model || fm.model,
+        disable: !seekModel,
+        ...(seekModel ? { model: seekModel } : {}),
         options: {
           ...extractOptions(fm),
           ...(config.raven_seek.reasoning_effort ? { reasoning_effort: config.raven_seek.reasoning_effort } : {}),
@@ -1831,7 +2019,8 @@ Then restart opencode for the model change to take effect. If the task can be co
         description: mcpFm.description || "",
         mode: mcpFm.mode || "subagent",
         hidden: mcpFm.hidden !== undefined ? mcpFm.hidden : true,
-        model: config.raven_mcp.model || mcpFm.model,
+        disable: !mcpModel,
+        ...(mcpModel ? { model: mcpModel } : {}),
         options: {
           ...extractOptions(mcpFm),
           ...(config.raven_mcp.reasoning_effort ? { reasoning_effort: config.raven_mcp.reasoning_effort } : {}),
@@ -1853,6 +2042,7 @@ Then restart opencode for the model change to take effect. If the task can be co
       updateToastPending = true
       mcpFailureToastPending = true
       duplicateMcpToastPending = duplicateMcpServers.length > 0
+      modelSetupToastPending = !!modelSetupInstructions()
     },
 
     // Register raven_seek tool — lets agents with task:false still delegate through Raven
@@ -1865,6 +2055,10 @@ Then restart opencode for the model change to take effect. If the task can be co
         },
         async execute(args, context) {
           const started = Date.now()
+          await refreshModelsIfPending()
+          if (!modelOperational("seek")) {
+            return { title: "Raven Seek", output: modelSetupInstructions("seek") }
+          }
           const timeout = (config.raven_seek.timeout ?? 600) * 1000
           let sessionId: string | undefined
           let resumed = false
@@ -2252,6 +2446,8 @@ Then restart opencode for the model change to take effect. If the task can be co
         }
       }
 
+      await refreshModelsIfPending()
+
       if (updateToastPending) {
         updateToastPending = false
         setTimeout(() => void notifyIfUpdateAvailable(), 500)
@@ -2264,6 +2460,10 @@ Then restart opencode for the model change to take effect. If the task can be co
         duplicateMcpToastPending = false
         setTimeout(() => void notifyIfDuplicateMcps(), 700)
       }
+      if (modelSetupToastPending) {
+        modelSetupToastPending = false
+        setTimeout(() => void notifyIfModelSetupRequired(), 300)
+      }
     },
 
     // /raven help|route|seek ...|mcp ...|update|stats|status
@@ -2272,6 +2472,7 @@ Then restart opencode for the model change to take effect. If the task can be co
       output.parts.length = 0
       const raw = input.arguments.trim()
       const arg = raw.toLowerCase()
+      if (!arg) await refreshModelsIfPending()
 
       if (arg === "help") {
         output.parts.push({ type: "text", text: helpText() })
@@ -2304,9 +2505,16 @@ Then restart opencode for the model change to take effect. If the task can be co
         const action = parts[1]?.toLowerCase()
         const value = parts.slice(2).join(" ").trim()
         if (action === "model" && value) {
-          updateConfig({ raven_seek: { model: value } })
+          if (value.toLowerCase() === "auto") {
+            updateConfig({ raven_seek: { model: undefined, autoSelectedModel: undefined } })
+            await ensureRavenModels()
+          } else {
+            updateConfig({ raven_seek: { model: value, autoSelectedModel: undefined } })
+          }
           delete ravenProviderIssues.seek
-          output.parts.push({ type: "text", text: `Raven Search model set to: ${value}\nRestart opencode for the change to take effect.` })
+          output.parts.push({ type: "text", text: config.raven_seek.model
+            ? `Raven Search model set to: ${modelLabel(config.raven_seek)}\nRestart opencode for the change to take effect.`
+            : modelSetupInstructions("seek") })
         } else if (action === "effort" && value) {
           updateConfig({ raven_seek: { reasoning_effort: value } })
           output.parts.push({ type: "text", text: `Raven Search reasoning effort set to: ${value}\nRestart opencode for the change to take effect.` })
@@ -2344,9 +2552,16 @@ Then restart opencode for the model change to take effect. If the task can be co
           }
         } else if (action === "model" && parts.slice(2).join(" ").trim()) {
           const model = parts.slice(2).join(" ").trim()
-          updateConfig({ raven_mcp: { model } })
+          if (model.toLowerCase() === "auto") {
+            updateConfig({ raven_mcp: { model: undefined, autoSelectedModel: undefined } })
+            await ensureRavenModels()
+          } else {
+            updateConfig({ raven_mcp: { model, autoSelectedModel: undefined } })
+          }
           delete ravenProviderIssues.mcp
-          output.parts.push({ type: "text", text: `Raven MCP model set to: ${model}\nRestart opencode for the change to take effect.` })
+          output.parts.push({ type: "text", text: config.raven_mcp.model
+            ? `Raven MCP model set to: ${modelLabel(config.raven_mcp)}\nRestart opencode for the change to take effect.`
+            : modelSetupInstructions("mcp") })
         } else if (action === "effort" && parts.slice(2).join(" ").trim()) {
           const effort = parts.slice(2).join(" ").trim()
           updateConfig({ raven_mcp: { reasoning_effort: effort } })
@@ -2390,7 +2605,8 @@ Then restart opencode for the model change to take effect. If the task can be co
               ? `Update: up to date (latest ${info.latest}).`
               : "Update: unable to check npm."
         } catch { /* keep fallback */ }
-        output.parts.push({ type: "text", text: `Raven version: ${PACKAGE_VERSION}.\nSearch agent: ${seek.model || fm.model || "(default)"}. Reasoning: ${seek.reasoning_effort || fm.reasoning_effort || "(default)"}. Timeout: ${seek.timeout ?? 600}s.${seekIssue}\nMCP agent: ${mcp.model || mcpFm.model || "(default)"}. Reasoning: ${mcp.reasoning_effort || mcpFm.reasoning_effort || "(default)"}. Timeout: ${mcp.timeout ?? 600}s.${mcpIssue}\n${update}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
+        const setup = modelSetupInstructions()
+        output.parts.push({ type: "text", text: `Raven version: ${PACKAGE_VERSION}.\nSearch agent: ${modelLabel(seek)}. Reasoning: ${seek.reasoning_effort || fm.reasoning_effort || "(default)"}. Timeout: ${seek.timeout ?? 600}s.${seekIssue}\nMCP agent: ${modelLabel(mcp)}. Reasoning: ${mcp.reasoning_effort || mcpFm.reasoning_effort || "(default)"}. Timeout: ${mcp.timeout ?? 600}s.${mcpIssue}\n${update}${setup ? `\n\n${setup}` : ""}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
       }
     },
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.2
+
+### Added
+- Fresh installs automatically select an available zero-cost, tool-capable model from OpenCode's connected provider catalog for Raven Search and Raven MCP.
+- `/raven seek model auto` and `/raven mcp model auto` retry free-model detection.
+
+### Changed
+- Removed the retired `opencode/deepseek-v4-flash-free` default. Raven now leaves routing inactive and shows first-time setup instructions when no suitable free model is available.
+- Auto-selected models are rechecked on startup, while manually configured models are never replaced.
+
 ## 2.2.1
 
 ### Fixed

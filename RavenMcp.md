@@ -2,7 +2,6 @@
 description: Focused on-demand MCP agent that retrieves compact information through Raven's internal MCP bridge.
 mode: subagent
 hidden: true
-model: opencode/deepseek-v4-flash-free
 reasoning_effort: low
 permission:
   "*": deny
