@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Automatic MCP refresh now runs once per workspace per TUI launch, rather than repeating on plugin reactivation or returning from sessions. Manual refresh remains available.
+
 ## 2.3.1
 
 ### Fixed

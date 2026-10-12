@@ -73,9 +73,16 @@ export default {
         ctx.ui.toast.show(event.data)
       }
     })
-    // V2's service outlives the TUI. Check MCP health on each client attachment,
-    // not just once when the server plugin is initialized.
-    void refreshMcps()
+    // Plugin activation can repeat during a single TUI's lifetime. Memory state
+    // survives those reloads, but resets on a real TUI restart (unlike disk state).
+    const location = ctx.location ?? ctx.data.location.default()
+    const [startup, updateStartup] = ctx.storage.memory("mcp-startup-refresh", {
+      initial: { directories: [] as string[] },
+    })
+    if (!startup.directories.includes(location.directory)) {
+      updateStartup((state) => { state.directories.push(location.directory) })
+      void refreshMcps()
+    }
     ctx.keymap.layer(() => ({ commands: [{
       id: "raven", title: "Raven", description: "Manage Raven routing, MCPs, models, and status",
       slash: { name: "raven", arguments: true },

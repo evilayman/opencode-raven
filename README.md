@@ -125,7 +125,7 @@ OpenCode's built-in tools already exist; Raven routes selected calls instead of 
 
 On-demand MCPs are different: Raven discovers and calls them internally, so their full schemas are not registered globally. Enabled servers are probed after startup to discover tools and health, then per-session connections are opened when Raven uses them. "On-demand" describes schema exposure and normal use, not the absence of a startup health probe.
 
-On OpenCode V2, reopening the TUI triggers a fresh background health and tool-discovery check even if the shared service is still running. Overlapping attachment checks share the same refresh. Use `/raven mcp refresh [server_name]` to retry manually without restarting the service.
+On OpenCode V2, reopening the TUI triggers a fresh background health and tool-discovery check even if the shared service is still running. This runs once per workspace per TUI launch; returning from sessions or reactivating the plugin does not repeat it. Overlapping attachment checks share the same refresh. Use `/raven mcp refresh [server_name]` to retry manually without restarting the service.
 
 Automatic and manual MCP refreshes use top-right notifications for progress and results, without opening a command dialog or a session tab.
 

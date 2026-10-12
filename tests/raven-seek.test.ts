@@ -482,6 +482,17 @@ describe("Raven MCP delegation", () => {
   })
 })
 
+function tuiStorage() {
+  const values = new Map<string, any>()
+  return {
+    memory(key: string, options: { initial: object }) {
+      if (!values.has(key)) values.set(key, options.initial)
+      const value = values.get(key)
+      return [value, (mutate: (state: any) => void) => mutate(value)]
+    },
+  }
+}
+
 function v2Fixture() {
   const tools: Record<string, any> = {}
   const agents: Record<string, any> = {}
@@ -809,12 +820,13 @@ describe("OpenCode 2 integration", () => {
     }
   })
 
-  test("each TUI attachment refreshes MCPs without blocking and reports RPC errors", async () => {
+  test("each new TUI launch refreshes MCPs without blocking and reports RPC errors", async () => {
     const pending = Promise.withResolvers<{ refreshed: string[]; failed: string[] }>()
     const refreshMcps = mock((_input: any, _options: any) => pending.promise)
     const toast = mock((_notice: any) => {})
     const unsubscribe = mock(() => {})
     const ctx = {
+      storage: tuiStorage(),
       client: { rpc: () => ({ refreshMcps, events: { on: () => unsubscribe } }) },
       data: { location: { default: () => ({ directory: "C:\\workspace" }) } },
       keymap: { layer: () => {} },
@@ -824,7 +836,7 @@ describe("OpenCode 2 integration", () => {
     expect(refreshMcps).toHaveBeenCalledTimes(1)
     expect(toast.mock.calls[0][0]).toMatchObject({ variant: "info", message: expect.stringContaining("Refreshing") })
     closeFirst()
-    const closeSecond = RavenTui.setup(ctx as any)
+    const closeSecond = RavenTui.setup({ ...ctx, storage: tuiStorage() } as any)
     try {
       expect(refreshMcps).toHaveBeenCalledTimes(2)
       expect(refreshMcps.mock.calls[1][1].location).toEqual({ directory: "C:\\workspace" })
@@ -836,6 +848,40 @@ describe("OpenCode 2 integration", () => {
     } finally { closeSecond() }
   })
 
+  test("returning from sessions or reactivating a plugin does not repeat the startup refresh", async () => {
+    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: ["context7"], failed: [] }))
+    const toast = mock((_notice: any) => {})
+    const storage = tuiStorage()
+    let layer: any
+    const ctx = {
+      storage,
+      location: { directory: "C:\\workspace" },
+      client: { rpc: () => ({ refreshMcps, events: { on: () => () => {} } }) },
+      keymap: { layer: (factory: any) => { layer = factory() } },
+      ui: { toast: { show: toast } },
+    }
+    const first = RavenTui.setup(ctx as any)
+    await layer.commands[0].run("/raven mcp refresh") // Wait for the shared startup check.
+    first()
+    const second = RavenTui.setup({ ...ctx } as any)
+    try {
+      expect(refreshMcps).toHaveBeenCalledTimes(1)
+      expect(toast).toHaveBeenCalledTimes(2)
+      await layer.commands[0].run("/raven mcp refresh")
+      expect(refreshMcps).toHaveBeenCalledTimes(2) // Explicit refresh still works.
+    } finally { second() }
+    const third = RavenTui.setup({ ...ctx } as any)
+    expect(refreshMcps).toHaveBeenCalledTimes(2)
+    third()
+    const otherWorkspace = RavenTui.setup({ ...ctx, location: { directory: "C:\\other" } } as any)
+    await layer.commands[0].run("/raven mcp refresh")
+    expect(refreshMcps).toHaveBeenCalledTimes(3)
+    otherWorkspace()
+    const back = RavenTui.setup(ctx as any)
+    expect(refreshMcps).toHaveBeenCalledTimes(3)
+    back()
+  })
+
   test("manual and automatic refreshes show only notifications, including partial failures", async () => {
     const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: ["context7"], failed: [] as string[] }))
     const command = mock(async () => ({ text: "Unexpected dialog" }))
@@ -843,6 +889,7 @@ describe("OpenCode 2 integration", () => {
     const show = mock(() => {})
     let layer: any
     const cleanup = RavenTui.setup({
+      storage: tuiStorage(),
       client: { rpc: () => ({ command, refreshMcps, events: { on: () => () => {} } }) },
       location: { directory: "C:\\workspace" },
       keymap: { layer: (factory: any) => { layer = factory() } },
@@ -878,6 +925,7 @@ describe("OpenCode 2 integration", () => {
     let receive!: (event: any) => Promise<void>
     let layer: any
     const cleanup = RavenTui.setup({
+      storage: tuiStorage(),
       client: { rpc: () => ({ command, refreshMcps, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
       location: { directory: "C:\\workspace" },
       renderer: screen.renderer,
