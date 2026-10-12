@@ -3,7 +3,7 @@ import type { PluginInput, Hooks, ToolContext as V1ToolContext } from "@opencode
 import type { SessionMessageInfo, SessionInfo } from "@opencode/client"
 import { z } from "zod"
 import createRavenRuntime from "./raven-core"
-import { RavenRpc } from "./rpc"
+import { RavenRpc, mcpRefreshArguments, mcpRefreshToast } from "./rpc"
 
 type Context = Plugin.Context
 type RequestOptions = NonNullable<Parameters<Context["session"]["get"]>[1]>
@@ -201,9 +201,20 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       await raven["command.execute.before"]({ command: "raven", arguments: raw, sessionID: "" }, output)
       return { text: output.parts.map((part) => part.text).join("\n") }
     }
-    const rpc = await ctx.rpc.register(RavenRpc, { command: async ({ arguments: raw }) => executeCommand(raw) })
+    const rpc = await ctx.rpc.register(RavenRpc, {
+      command: async ({ arguments: raw }) => executeCommand(raw),
+      refreshMcps: async ({ serverName }) => raven.refreshMcps(serverName),
+    })
     registrations.push(rpc)
     emitNotice = (notice) => rpc.events.emit("notice", notice)
+
+    // Delegation needs no extra confirmation. Preserve deny rules and leave
+    // child tools and the Raven-only MCP bridge's permissions unchanged.
+    registrations.push(await ctx.permission.hook("evaluate", (event) => {
+      if (event.effect === "ask" && (event.action === "raven_seek" || event.action === "raven_mcp")) {
+        event.effect = "allow"
+      }
+    }))
 
     registrations.push(await ctx.agent.transform((editor) => {
       for (const [id, definition] of Object.entries(agents)) {
@@ -276,8 +287,8 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     }))
     registrations.push(await ctx.session.hook("context", async (event) => {
       await raven["chat.message"]({ sessionID: event.sessionID, agent: event.agent }, {})
-      if (event.agent === "raven" || event.agent === "raven-mcp") return
-      event.system.push({ type: "text", text: raven.guidance() })
+      if (event.agent === "raven") return
+      event.system.push({ type: "text", text: event.agent === "raven-mcp" ? raven.mcpGuidance() : raven.guidance() })
     }))
     registrations.push(await ctx.session.hook("retry", async (event) => {
       await raven.event({ event: {
@@ -288,6 +299,17 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       editor.add({
         name: "raven", description: "Manage Raven routing, MCPs, models, timeouts, updates, and status",
         async execute({ sessionID, prompt }) {
+          const refresh = mcpRefreshArguments(prompt.text)
+          if (refresh) {
+            await emitNotice({ kind: "toast", sessionID, title: "Raven MCP", message: `Refreshing ${refresh.serverName ?? "on-demand MCPs"}…`, variant: "info" })
+            try {
+              const result = await raven.refreshMcps(refresh.serverName)
+              await emitNotice({ kind: "toast", sessionID, ...mcpRefreshToast(result) })
+            } catch (error) {
+              await emitNotice({ kind: "toast", sessionID, title: "Raven MCP", message: `Refresh failed: ${String(error)}`, variant: "error" })
+            }
+            return
+          }
           const { text } = await executeCommand(prompt.text)
           await emitNotice({ kind: "command", sessionID, message: text, title: "Raven" })
         },

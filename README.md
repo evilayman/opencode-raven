@@ -60,7 +60,7 @@ OpenCode resolves the package from npm and caches it automatically.
 
 Keep using `opencode-raven`; change its OpenCode config entry from `plugin` to `plugins`. Raven's existing `~/.config/opencode/opencode-raven/raven-config.json` is shared by both versions, including models, on-demand MCPs, routing settings, and stats. Quit and restart OpenCode after upgrading.
 
-OpenCode 1 uses Raven's `server()` entrypoint; OpenCode 2 uses `setup()` and automatically loads the terminal companion. The terminal companion displays `/raven` command results in a dialog and delivers startup/update warnings as toasts, without sending a prompt to the model. The v2 server also exposes the typed `opencode-raven/rpc` command contract for other clients.
+OpenCode 1 uses Raven's `server()` entrypoint; OpenCode 2 uses `setup()` and automatically loads the terminal companion. The terminal companion displays `/raven` command results in a scrollable dialog (arrow keys, Page Up/Down, or mouse wheel; Esc to close) and delivers startup/update warnings as toasts, without sending a prompt to the model. The v2 server also exposes the typed `opencode-raven/rpc` command contract for other clients.
 
 The v1 minimum is 1.18.29 because earlier versions cannot load the shared object entrypoint. See OpenCode's [plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1) for the upstream lifecycle and config changes.
 
@@ -110,6 +110,8 @@ Under the hood, Raven registers two public delegation tools and one internal bri
 | `raven_mcp` | Creates or resumes a Raven MCP session for configured on-demand MCP capabilities. |
 | `raven_mcp_bridge` | Internal bridge used only by the Raven MCP agent. |
 
+On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Explicit deny rules still apply. This does not change permission checks for other tools or access restrictions on the internal MCP bridge.
+
 For a related follow-up, the main agent can reuse the ID returned by the earlier call:
 
 ```text
@@ -122,6 +124,10 @@ Raven accepts a resumed session only when it belongs to the same root session tr
 OpenCode's built-in tools already exist; Raven routes selected calls instead of replacing those tools. Global MCPs also remain globally registered, so their schemas still enter the main session even when Raven routes their calls.
 
 On-demand MCPs are different: Raven discovers and calls them internally, so their full schemas are not registered globally. Enabled servers are probed after startup to discover tools and health, then per-session connections are opened when Raven uses them. "On-demand" describes schema exposure and normal use, not the absence of a startup health probe.
+
+On OpenCode V2, reopening the TUI triggers a fresh background health and tool-discovery check even if the shared service is still running. Overlapping attachment checks share the same refresh. Use `/raven mcp refresh [server_name]` to retry manually without restarting the service.
+
+Automatic and manual MCP refreshes use top-right notifications for progress and results, without opening a command dialog or a session tab.
 
 ## Configuration
 

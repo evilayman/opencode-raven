@@ -5,6 +5,8 @@ import { tmpdir } from "node:os"
 import RavenModule from "../index"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
 import RavenTui from "../tui"
+import { createTestRenderer } from "@opentui/core/testing"
+import { RGBA, ScrollBoxRenderable, type BoxRenderable } from "@opentui/core"
 
 const RavenPlugin = RavenModule.server
 
@@ -558,6 +560,9 @@ function v2Fixture() {
     },
     session: { ...session, hook: mock(async (name: string, callback: any) => { hooks[`session.${name}`] = callback; return register() }) },
     model: { list: mock(async () => ({ data: [] as any[] })) },
+    permission: {
+      hook: mock(async (name: string, callback: any) => { hooks[`permission.${name}`] = callback; return register() }),
+    },
     rpc: { register: mock(async (_definition: any, handlers: any) => {
       Object.assign(rpcHandlers, handlers)
       return { ...register(), events: { emit: rpcEmit } }
@@ -591,11 +596,11 @@ function v2Fixture() {
   }
 }
 
-async function setupV2(fixture = v2Fixture()) {
+async function setupV2(fixture = v2Fixture(), servers: Record<string, any> = {}) {
   mkdirSync(ravenConfigDir, { recursive: true })
   writeFileSync(ravenConfigFile, JSON.stringify({
     raven_seek: { model: "provider/search" },
-    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+    raven_mcp: { model: "provider/mcp", onDemandMcpServers: servers },
   }))
   const cleanup = await RavenModule.setup(fixture.ctx as unknown as V2Plugin.Context)
   return { ...fixture, cleanup: cleanup as () => Promise<void> }
@@ -709,28 +714,227 @@ describe("OpenCode 2 integration", () => {
     } finally { await f.cleanup() }
   })
 
-  test("terminal companion displays command output and filters notices by location", async () => {
+  test("auto-approves public delegation without overriding denials or other tool permissions", async () => {
+    const f = await setupV2()
+    try {
+      for (const action of ["raven_seek", "raven_mcp"]) {
+        const event = { action, effect: "ask" }
+        await f.hooks["permission.evaluate"](event)
+        expect(event.effect).toBe("allow")
+        const denied = { action, effect: "deny" }
+        await f.hooks["permission.evaluate"](denied)
+        expect(denied.effect).toBe("deny")
+      }
+      for (const action of ["raven_mcp_bridge", "shell", "read", "other_mcp", "raven_seek_other"]) {
+        const event = { action, effect: "ask" }
+        await f.hooks["permission.evaluate"](event)
+        expect(event.effect).toBe("ask")
+      }
+    } finally { await f.cleanup() }
+  })
+
+  test("native MCP refresh commands emit only progress and result toasts", async () => {
+    const f = await setupV2()
+    try {
+      await f.commands.raven.execute({ sessionID: "ses_parent", prompt: { text: "mcp refresh" } })
+      expect(f.rpcEmit.mock.calls).toEqual([
+        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "info", message: expect.stringContaining("Refreshing") })],
+        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "success", message: expect.stringContaining("Refresh complete") })],
+      ])
+      expect(f.session.synthetic).not.toHaveBeenCalled()
+      expect(f.session.prompt).not.toHaveBeenCalled()
+      expect(f.session.create).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  })
+
+  test("client refresh shares startup, rechecks ready MCPs, coalesces requests, and recovers failures", async () => {
+    let probes = 0
+    let toolName = "first_tool"
+    let fail = false
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      if (request.method !== "POST") return new Response(null, { status: 405 })
+      const body = await request.json() as any
+      if (body.id === undefined) return new Response(null, { status: 202 })
+      if (body.method === "initialize") return Response.json({ jsonrpc: "2.0", id: body.id, result: {
+        protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" },
+      } })
+      if (body.method === "tools/list") {
+        probes++
+        return Response.json(fail
+          ? { jsonrpc: "2.0", id: body.id, error: { code: -32603, message: "MCP temporarily unavailable" } }
+          : { jsonrpc: "2.0", id: body.id, result: { tools: [{ name: toolName, description: toolName, inputSchema: { type: "object" } }] } })
+      }
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: {} })
+    } })
+    let f: Awaited<ReturnType<typeof setupV2>> | undefined
+    try {
+      f = await setupV2(v2Fixture(), { fixture: { type: "remote", url: `http://127.0.0.1:${server.port}/mcp`, timeout: 1000 } })
+      const initial = await Promise.all([f.rpcHandlers.refreshMcps({}), f.rpcHandlers.refreshMcps({})])
+      expect(initial).toEqual([{ refreshed: ["fixture"], failed: [] }, { refreshed: ["fixture"], failed: [] }])
+      expect(probes).toBe(1)
+      expect(f.hooks["session.context"]).toBeDefined()
+
+      toolName = "updated_tool"
+      const [fresh, manual] = await Promise.all([
+        f.rpcHandlers.refreshMcps({}),
+        f.rpcHandlers.command({ arguments: "mcp refresh" }),
+      ])
+      expect(fresh).toEqual({ refreshed: ["fixture"], failed: [] })
+      expect(manual.text).toContain("Refreshed: fixture")
+      expect(probes).toBe(2)
+      for (const agent of ["build", "raven-mcp"]) {
+        const guidance = { sessionID: "ses_parent", agent, system: [] as any[] }
+        await f.hooks["session.context"](guidance)
+        expect(guidance.system[0].text).toContain("updated_tool")
+        expect(guidance.system[0].text).not.toContain("first_tool")
+        expect(guidance.system[0].text).toContain(agent === "raven-mcp" ? "Use raven_mcp_bridge" : "public raven_mcp delegator")
+      }
+      expect(f.agents["raven-mcp"].system).not.toContain("Discovered capabilities:")
+
+      fail = true
+      expect(await f.rpcHandlers.refreshMcps({})).toEqual({ refreshed: [], failed: ["fixture"] })
+      expect((await f.rpcHandlers.command({ arguments: "mcp" })).text).toContain("failed")
+      fail = false
+      expect(await f.rpcHandlers.refreshMcps({})).toEqual({ refreshed: ["fixture"], failed: [] })
+      const metadata = JSON.parse(readFileSync(join(ravenConfigDir, "autogenerated-on-demand-mcp-metadata.json"), "utf-8"))
+      expect(metadata.fixture.status).toBe("ready")
+      expect(metadata.fixture.lastError).toBeUndefined()
+      expect(probes).toBe(4)
+      expect(await f.rpcHandlers.refreshMcps({ serverName: "FIXTURE" })).toEqual({ refreshed: ["fixture"], failed: [] })
+      expect(probes).toBe(5)
+      expect(f.session.prompt).not.toHaveBeenCalled()
+    } finally {
+      await f?.cleanup()
+      server.stop(true)
+    }
+  })
+
+  test("each TUI attachment refreshes MCPs without blocking and reports RPC errors", async () => {
+    const pending = Promise.withResolvers<{ refreshed: string[]; failed: string[] }>()
+    const refreshMcps = mock((_input: any, _options: any) => pending.promise)
+    const toast = mock((_notice: any) => {})
+    const unsubscribe = mock(() => {})
+    const ctx = {
+      client: { rpc: () => ({ refreshMcps, events: { on: () => unsubscribe } }) },
+      data: { location: { default: () => ({ directory: "C:\\workspace" }) } },
+      keymap: { layer: () => {} },
+      ui: { toast: { show: toast } },
+    }
+    const closeFirst = RavenTui.setup(ctx as any)
+    expect(refreshMcps).toHaveBeenCalledTimes(1)
+    expect(toast.mock.calls[0][0]).toMatchObject({ variant: "info", message: expect.stringContaining("Refreshing") })
+    closeFirst()
+    const closeSecond = RavenTui.setup(ctx as any)
+    try {
+      expect(refreshMcps).toHaveBeenCalledTimes(2)
+      expect(refreshMcps.mock.calls[1][1].location).toEqual({ directory: "C:\\workspace" })
+      pending.reject(new Error("RPC disconnected"))
+      await pending.promise.catch(() => {})
+      await Promise.resolve()
+      expect(toast).toHaveBeenCalledTimes(3) // Two progress toasts, only the open client's error.
+      expect(toast.mock.calls[2][0].message).toContain("/raven mcp refresh")
+    } finally { closeSecond() }
+  })
+
+  test("manual and automatic refreshes show only notifications, including partial failures", async () => {
+    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: ["context7"], failed: [] as string[] }))
+    const command = mock(async () => ({ text: "Unexpected dialog" }))
+    const toast = mock((_notice: any) => {})
+    const show = mock(() => {})
+    let layer: any
+    const cleanup = RavenTui.setup({
+      client: { rpc: () => ({ command, refreshMcps, events: { on: () => () => {} } }) },
+      location: { directory: "C:\\workspace" },
+      keymap: { layer: (factory: any) => { layer = factory() } },
+      ui: { dialog: { show }, toast: { show: toast } },
+    } as any)
+    try {
+      await layer.commands[0].run("/raven mcp refresh") // Shares the attachment check already in flight.
+      expect(refreshMcps).toHaveBeenCalledTimes(1)
+      expect(toast.mock.calls.map(([notice]) => notice.variant)).toEqual(["info", "success"])
+      expect(toast.mock.calls[1][0].message).toContain("context7")
+      toast.mockClear()
+      refreshMcps.mockImplementation(async () => ({ refreshed: ["context7"], failed: ["exa"] }))
+      await layer.commands[0].run("/raven mcp refresh")
+      expect(toast.mock.calls.map(([notice]) => notice.variant)).toEqual(["info", "warning"])
+      expect(toast.mock.calls[1][0].message).toContain("Failed: exa")
+      expect(command).not.toHaveBeenCalled()
+      expect(show).not.toHaveBeenCalled()
+      await layer.commands[0].run("/raven mcp refresh context7")
+      expect(refreshMcps.mock.calls[2][0]).toEqual({ serverName: "context7" })
+      expect(show).not.toHaveBeenCalled()
+    } finally { cleanup() }
+  })
+
+  test("terminal companion displays scrollable command output and filters notices by location", async () => {
     const command = mock(async (_input: any, _options: any) => ({ text: "Raven status" }))
-    const alert = mock(async (_input: any) => {})
+    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: [], failed: [] }))
+    const screen = await createTestRenderer({ width: 74, height: 24 })
+    let dialog!: BoxRenderable
+    const show = mock((render: () => any) => { dialog = render(); screen.renderer.root.add(dialog) })
+    const set = mock((_options: any) => {})
     const toast = mock((_input: any) => {})
     const unsubscribe = mock(() => {})
     let receive!: (event: any) => Promise<void>
     let layer: any
     const cleanup = RavenTui.setup({
-      client: { rpc: () => ({ command, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
+      client: { rpc: () => ({ command, refreshMcps, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
       location: { directory: "C:\\workspace" },
+      renderer: screen.renderer,
+      theme: { surface: () => ({ background: { base: RGBA.fromValues(0.1, 0.1, 0.1, 0) }, text: { base: RGBA.fromHex("#ffffff"), muted: RGBA.fromHex("#aaaaaa") } }) },
       keymap: { layer: (factory: any) => { layer = factory() } },
-      ui: { dialog: { alert }, toast: { show: toast }, router: { current: () => ({ type: "session", sessionID: "ses_parent" }) } },
+      ui: { dialog: { show, set }, toast: { show: toast }, router: { current: () => ({ type: "session", sessionID: "ses_parent" }) } },
     } as any)
-    await layer.commands[0].run("/raven help")
-    expect(command).toHaveBeenCalledWith({ arguments: "help" }, { location: { directory: "C:\\workspace" } })
-    expect(alert).toHaveBeenCalledWith({ title: "Raven", message: "Raven status" })
-    await receive({ location: { directory: "C:\\other" }, data: { kind: "toast", message: "Wrong location" } })
-    expect(toast).not.toHaveBeenCalled()
-    await receive({ location: { directory: "C:\\workspace" }, data: { kind: "toast", message: "MCP warning", variant: "warning" } })
-    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: "MCP warning" }))
-    cleanup()
+    try {
+      expect(refreshMcps).toHaveBeenCalledWith({}, expect.objectContaining({ location: { directory: "C:\\workspace" }, signal: expect.any(AbortSignal) }))
+      expect(show).not.toHaveBeenCalled()
+      await layer.commands[0].run("/raven help")
+      expect(command).toHaveBeenCalledWith({ arguments: "help" }, { location: { directory: "C:\\workspace" } })
+      expect(set).toHaveBeenCalledWith({ size: "large", centered: true })
+      await screen.renderOnce()
+      expect(screen.captureCharFrame()).toContain("Raven status")
+      const scroll = dialog.getChildren().find((child) => child instanceof ScrollBoxRenderable) as ScrollBoxRenderable
+      expect(scroll.focused).toBe(true)
+      expect(dialog.backgroundColor.a).toBe(1)
+      toast.mockClear() // Automatic refresh notifications are tested separately.
+      await receive({ location: { directory: "C:\\other" }, data: { kind: "toast", message: "Wrong location" } })
+      expect(toast).not.toHaveBeenCalled()
+      await receive({ location: { directory: "C:\\workspace" }, data: { kind: "toast", message: "MCP warning", variant: "warning" } })
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: "MCP warning" }))
+      dialog.destroyRecursively()
+      const listeners = screen.renderer.listenerCount("resize")
+      await receive({ location: { directory: "C:\\workspace" }, data: { kind: "command", sessionID: "other", message: "Wrong session" } })
+      expect(show).toHaveBeenCalledTimes(1)
+      await receive({ location: { directory: "C:\\workspace" }, data: { kind: "command", sessionID: "ses_parent", message: Array.from({ length: 80 }, (_, i) => `Output line ${i}`).join("\n") } })
+      await screen.renderOnce()
+      const longScroll = dialog.getChildren().find((child) => child instanceof ScrollBoxRenderable) as ScrollBoxRenderable
+      expect(longScroll.scrollHeight).toBeGreaterThan(longScroll.height)
+      screen.mockInput.pressArrow("down")
+      await screen.renderOnce()
+      expect(longScroll.scrollTop).toBeGreaterThan(0)
+      const previous = longScroll.scrollTop
+      await screen.mockMouse.scroll(longScroll.x + 1, longScroll.y + 1, "down")
+      await screen.renderOnce()
+      expect(longScroll.scrollTop).toBeGreaterThan(previous)
+      const beforePage = longScroll.scrollTop
+      await screen.mockInput.pressKeys(["\u001b[6~"])
+      await screen.renderOnce()
+      expect(longScroll.scrollTop).toBeGreaterThan(beforePage + 1)
+      longScroll.scrollTo(longScroll.scrollHeight)
+      await screen.renderOnce()
+      expect(screen.captureCharFrame()).toContain("Output line 79")
+      screen.resize(42, 14)
+      await screen.renderOnce()
+      expect(dialog.height).toBe(10)
+      expect(longScroll.height).toBeGreaterThan(0)
+      dialog.destroyRecursively()
+      expect(screen.renderer.listenerCount("resize")).toBe(listeners)
+    } finally {
+      cleanup()
+      screen.renderer.destroy()
+    }
     expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(refreshMcps.mock.calls[0][1].signal.aborted).toBe(true)
   })
 
   test("rejects foreign roots, the wrong agent, and switched-agent history", async () => {

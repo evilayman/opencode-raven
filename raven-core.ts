@@ -719,8 +719,10 @@ export default (async (input: Pick<PluginInput, "client" | "directory"> & { proj
   let duplicateMcpToastPending = false
   let modelSetupToastPending = false
   let mcpRefreshScheduled = false
+  let mcpStartupRefreshComplete = false
   let mcpRefreshPromise: Promise<{ refreshed: string[]; failed: string[] }> | undefined
   let mcpRefreshQueue: Promise<unknown> = Promise.resolve()
+  const pendingMcpRefreshes = new Map<string, Promise<{ refreshed: string[]; failed: string[] }>>()
   const mcpRefreshControllers = new Set<AbortController>()
   let lastNotifiedMcpFailureKey = ""
   const ravenProviderIssues: Partial<Record<DelegationKind, string>> = {}
@@ -884,8 +886,9 @@ Then restart opencode for the model change to take effect. If the task can be co
 
   function ravenMcpAgentPrompt(): string {
     const extra = config.raven_mcp.instructions?.trim()
-    const onDemand = onDemandMcpGuidance("raven")
-    const prompt = `${ravenMcpPrompt}\n\nOn-demand MCP guidance:\n${onDemand}`
+    // V2 supplies current capabilities through the session context hook.
+    const prompt = host === "v2" ? ravenMcpPrompt
+      : `${ravenMcpPrompt}\n\nOn-demand MCP guidance:\n${onDemandMcpGuidance("raven")}`
     return extra ? `${prompt}\n\nAdditional user instructions:\n${extra}` : prompt
   }
 
@@ -1378,6 +1381,9 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function queueOnDemandMcpRefresh(force = false, serverName?: string, delay = 0): Promise<{ refreshed: string[]; failed: string[] }> {
+    const key = `${force}:${serverName?.toLowerCase() ?? "*"}`
+    const pending = pendingMcpRefreshes.get(key)
+    if (pending) return pending
     const controller = new AbortController()
     mcpRefreshControllers.add(controller)
     const run = mcpRefreshQueue
@@ -1386,7 +1392,11 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (delay) await waitForRefreshDelay(delay, controller.signal)
         return refreshOnDemandMcpDescriptions(force, serverName, controller.signal)
       })
-      .finally(() => mcpRefreshControllers.delete(controller))
+      .finally(() => {
+        mcpRefreshControllers.delete(controller)
+        pendingMcpRefreshes.delete(key)
+      })
+    pendingMcpRefreshes.set(key, run)
     mcpRefreshQueue = run
     return run
   }
@@ -1395,6 +1405,7 @@ Then restart opencode for the model change to take effect. If the task can be co
     if (mcpRefreshScheduled) return mcpRefreshPromise!
     mcpRefreshScheduled = true
     mcpRefreshPromise = queueOnDemandMcpRefresh(false, undefined, 1000)
+      .finally(() => { mcpStartupRefreshComplete = true })
     return mcpRefreshPromise
   }
 
@@ -1977,6 +1988,16 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   return {
+    async refreshMcps(serverName?: string) {
+      // V2 clients present the refresh lifecycle themselves, including failures.
+      mcpFailureToastPending = false
+      // First attachment shares the startup probe; later attachments force a
+      // fresh health/tool-discovery check even when cached status is ready.
+      const result = await (!serverName && !mcpStartupRefreshComplete
+        ? scheduleOnDemandMcpRefresh()
+        : queueOnDemandMcpRefresh(true, serverName))
+      return result
+    },
     globalMcpRouting(names: string[]) {
       globalMcpServers = uniqueStrings(names)
       const onDemandNames = new Set(activeOnDemandMcpEntries().map(([name]) => name.toLowerCase()))
@@ -1986,6 +2007,9 @@ Then restart opencode for the model change to take effect. If the task can be co
     // V2 injects these texts at model-request time instead of using config.instructions.
     guidance() {
       return `${readFileSync(MCP_GUIDANCE_MD, "utf-8")}\n\n${onDemandMcpGuidance("delegate")}`
+    },
+    mcpGuidance() {
+      return `On-demand MCP guidance:\n${onDemandMcpGuidance("raven")}`
     },
     async dispose() {
       for (const controller of mcpRefreshControllers) controller.abort()

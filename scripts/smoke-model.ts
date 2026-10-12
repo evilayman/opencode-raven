@@ -29,7 +29,15 @@ export default {
       })
     })]
     registrations.push(await ctx.agent.transform((editor) => {
-      editor.update("build", (agent) => { agent.model = { providerID, id: Model.ID.make("caller") }; agent.permissions = [{ action: "*", resource: "*", effect: "allow" }] })
+      editor.update("build", (agent) => {
+        agent.model = { providerID, id: Model.ID.make("caller") }
+        agent.permissions = [
+          { action: "*", resource: "*", effect: "allow" },
+          // The native smoke must finish without an interactive approval.
+          { action: "raven_seek", resource: "*", effect: "ask" },
+          { action: "raven_mcp", resource: "*", effect: "ask" },
+        ]
+      })
     }))
     registrations.push(await ctx.tool.transform((editor) => {
       editor.add({ name: "grep", description: "Offline smoke search", input: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }, options: { codemode: false },

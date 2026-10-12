@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.1
+
+### Fixed
+- V2 manual MCP refreshes now use notifications only, and reopening the TUI shows refresh progress and results in top-right notifications.
+- V2 now refreshes on-demand MCP health and tool discovery whenever the TUI attaches to the background service, sharing overlapping checks instead of relying on one-time server initialization.
+- V2 MCP-agent requests now receive live capability guidance so refreshed tools are visible without reloading the agent or service.
+- V2 `/raven` output now uses an opaque, terminal-height-bounded dialog with keyboard and mouse scrolling instead of an overflowing alert.
+- V2 public Raven delegation no longer asks for confirmation on every call. Deny rules and permissions for other tools remain unchanged.
+
 ## 2.3.0
 
 ### Added

@@ -5,6 +5,10 @@ import { z } from "zod"
 export const RavenRpc = {
   id: "opencode-raven",
   methods: {
+    refreshMcps: {
+      input: z.object({ serverName: z.string().optional() }),
+      output: z.object({ refreshed: z.array(z.string()), failed: z.array(z.string()) }),
+    },
     command: {
       input: z.object({ arguments: z.string() }),
       output: z.object({ text: z.string() }),
@@ -25,3 +29,17 @@ export const RavenRpc = {
 } as const satisfies Rpc.PortableDefinition
 
 export default RavenRpc
+
+export function mcpRefreshArguments(raw: string): { serverName?: string } | undefined {
+  const match = raw.trim().match(/^mcp\s+refresh(?:\s+(.+))?$/i)
+  return match ? (match[1] ? { serverName: match[1].trim() } : {}) : undefined
+}
+
+export function mcpRefreshToast(result: { refreshed: string[]; failed: string[] }) {
+  const refreshed = result.refreshed.length ? result.refreshed.join(", ") : "none"
+  const failed = result.failed.length ? result.failed.join(", ") : "none"
+  return {
+    title: "Raven MCP", message: `Refresh complete.\nRefreshed: ${refreshed}\nFailed: ${failed}`,
+    variant: result.failed.length ? "warning" as const : "success" as const, duration: 6000,
+  }
+}
