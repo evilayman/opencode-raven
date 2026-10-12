@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.3.0
+
+### Added
+- OpenCode 2 support through a native `setup()` adapter, sharing Raven configuration and MCP runtime with OpenCode 1.
+- V2 agent/tool registration, shell routing, model discovery, guidance injection, child-session completion waiting, cancellation, continuation validation, and provider-error handling.
+- A v2 terminal companion and typed RPC contract for immediate `/raven` command output and notifications without a model turn.
+- Native-host smoke checks, including offline v2 routing and delegation, alongside v1/v2 regression tests.
+
+### Changed
+- Raised the OpenCode 1 minimum to 1.18.29 for the shared `server()`/`setup()` object entrypoint. The v2 adapter targets OpenCode 2.0.26 and newer 2.x releases.
+- OpenCode 2 installation uses `plugins`; OpenCode 1 continues to use `plugin`.
+- V2 update instructions delegate cache management to OpenCode instead of deleting v1 cache paths.
+
 ## 2.2.2
 
 ### Added

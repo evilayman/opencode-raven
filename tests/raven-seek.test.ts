@@ -2,7 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "b
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import RavenPlugin from "../index"
+import RavenModule from "../index"
+import type { Plugin as V2Plugin } from "@opencode/plugin"
+import RavenTui from "../tui"
+
+const RavenPlugin = RavenModule.server
 
 const originalUserProfile = process.env.USERPROFILE
 const testHome = join(tmpdir(), `opencode-raven-test-${process.pid}`)
@@ -473,5 +477,376 @@ describe("Raven MCP delegation", () => {
 
     expect(prompt).not.toHaveBeenCalled()
     expect(result.output).toContain("does not belong to the raven-mcp agent")
+  })
+})
+
+function v2Fixture() {
+  const tools: Record<string, any> = {}
+  const agents: Record<string, any> = {}
+  const commands: Record<string, any> = {}
+  const rpcHandlers: Record<string, any> = {}
+  const rpcEmit = mock(async (_name: string, _data: any) => {})
+  const hooks: Record<string, (...args: any[]) => Promise<void>> = {}
+  const registrations: Array<{ dispose: ReturnType<typeof mock> }> = []
+  const sessions = new Map<string, any>([["ses_parent", { id: "ses_parent", projectID: "project-1" }]])
+  const history = new Map<string, any[]>()
+  let pendingEvent: ((value: any) => void) | undefined
+  const register = () => {
+    const registration = { dispose: mock(async () => {}) }
+    registrations.push(registration)
+    return registration
+  }
+  const emit = (type: string, data: any) => pendingEvent?.({ type, data })
+  const session = {
+    get: mock(async ({ sessionID }: any) => {
+      const info = sessions.get(sessionID)
+      if (!info) throw new Error("Session not found")
+      return info
+    }),
+    create: mock(async (input: any, _options?: any) => {
+      const info = { ...input, id: `ses_v2_${sessions.size}`, projectID: "project-1" }
+      sessions.set(info.id, info)
+      return info
+    }),
+    update: mock(async () => {}),
+    interrupt: mock(async () => {}),
+    context: mock(async ({ sessionID }: any) => history.get(sessionID) ?? []),
+    synthetic: mock(async (_input: any, _options?: any) => ({ id: "msg_notice" })),
+    prompt: mock(async ({ sessionID, text }: any) => {
+      const messages = history.get(sessionID) ?? []
+      const admitted = { id: `msg_user_${messages.length}`, type: "user", text }
+      history.set(sessionID, [...messages, admitted])
+      return admitted
+    }),
+    wait: mock(async ({ sessionID }: any, _options?: any) => {
+      emit("session.text.delta", { sessionID, delta: "Result" })
+      const messages = history.get(sessionID) ?? []
+      const info = sessions.get(sessionID)
+      history.set(sessionID, [...messages, {
+        id: `msg_assistant_${messages.length}`, type: "assistant", agent: info.agent,
+        content: [{ type: "text", text: `Result ${messages.length}` }],
+        tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+      }])
+      info.outcome = "succeeded"
+    }),
+  }
+  const ctx = {
+    app: { version: "2.0.26" },
+    location: { directory: "C:\\workspace", project: { id: "project-1", directory: "C:\\workspace" } },
+    agent: {
+      transform: mock(async (callback: any) => {
+        callback({
+          update(id: string, update: any) {
+            const info = agents[id] ?? { id, request: { settings: {}, headers: {}, body: {} } }
+            update(info)
+            agents[id] = info
+          },
+          remove(id: string) { delete agents[id] },
+        })
+        return register()
+      }),
+      reload: mock(async () => {}),
+    },
+    tool: {
+      transform: mock(async (callback: any) => { callback({ add: (tool: any) => { tools[tool.name] = tool } }); return register() }),
+      hook: mock(async (name: string, callback: any) => { hooks[`tool.${name}`] = callback; return register() }),
+      reload: mock(async () => {}),
+    },
+    command: {
+      transform: mock(async (callback: any) => { callback({ add: (command: any) => { commands[command.name] = command } }); return register() }),
+      reload: mock(async () => {}),
+    },
+    session: { ...session, hook: mock(async (name: string, callback: any) => { hooks[`session.${name}`] = callback; return register() }) },
+    model: { list: mock(async () => ({ data: [] as any[] })) },
+    rpc: { register: mock(async (_definition: any, handlers: any) => {
+      Object.assign(rpcHandlers, handlers)
+      return { ...register(), events: { emit: rpcEmit } }
+    }) },
+    mcp: {
+      list: mock(async () => ({ data: [{ name: "globalDocs", status: { status: "connected" } }] })),
+      transform: mock(async (callback: any) => {
+        callback({ list: () => [["globalDocs", { type: "remote", url: "https://example.com/mcp" }]] })
+        return register()
+      }),
+    },
+    event: {
+      async *subscribe({ signal }: any) {
+        while (!signal.aborted) {
+          const event = await new Promise<any>((resolve) => {
+            pendingEvent = resolve
+            signal.addEventListener("abort", () => resolve(undefined), { once: true })
+          })
+          if (!event) break
+          yield event
+        }
+      },
+    },
+  }
+  return {
+    ctx, tools, agents, commands, hooks, sessions, history, session, registrations, emit, rpcHandlers, rpcEmit,
+    context: {
+      sessionID: "ses_parent", messageID: "msg_1", id: "call_1", agent: "build",
+      signal: new AbortController().signal, progress: mock(async () => {}),
+    },
+  }
+}
+
+async function setupV2(fixture = v2Fixture()) {
+  mkdirSync(ravenConfigDir, { recursive: true })
+  writeFileSync(ravenConfigFile, JSON.stringify({
+    raven_seek: { model: "provider/search" },
+    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+  }))
+  const cleanup = await RavenModule.setup(fixture.ctx as unknown as V2Plugin.Context)
+  return { ...fixture, cleanup: cleanup as () => Promise<void> }
+}
+
+describe("OpenCode 2 integration", () => {
+  test("exposes one dual entrypoint and registers native agents, tools, permissions, and commands", async () => {
+    expect(RavenModule.id).toBe("opencode-raven")
+    expect(typeof RavenModule.server).toBe("function")
+    const f = await setupV2()
+    try {
+      expect(f.agents.raven.model).toEqual({ providerID: "provider", id: "search" })
+      expect(f.agents.raven.permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
+      expect(f.agents.raven.permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "*", resource: "*", effect: "deny" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "raven_mcp_bridge", resource: "*", effect: "allow" })
+      expect(Object.keys(f.tools)).toEqual(["raven_seek", "raven_mcp", "raven_mcp_bridge"])
+      expect(f.tools.raven_seek.input.required).toEqual(["query"])
+      expect(f.commands.raven).toBeDefined()
+      expect(f.ctx.agent.reload).toHaveBeenCalledTimes(1)
+    } finally { await f.cleanup() }
+    expect(f.registrations.every((r) => r.dispose.mock.calls.length === 1)).toBe(true)
+    await f.cleanup() // disposal is idempotent
+    expect(f.registrations.every((r) => r.dispose.mock.calls.length === 1)).toBe(true)
+  })
+
+  test("waits for completion and returns the new answer and native child-session metadata", async () => {
+    const f = await setupV2()
+    try {
+      const first = await f.tools.raven_seek.execute({ query: "Find evidence" }, f.context)
+      expect(first.content).toContain("Result 1")
+      expect(first.metadata.sessionId).toBe("ses_v2_1")
+      expect(f.session.create.mock.calls[0]).toEqual([expect.objectContaining({
+        parentID: "ses_parent", agent: "raven", model: { providerID: "provider", id: "search" },
+        metadata: { opencodeRavenAgent: "raven" },
+      }), expect.objectContaining({ signal: expect.any(AbortSignal) })])
+      const second = await f.tools.raven_seek.execute({ query: "Follow up", sessionId: first.metadata.sessionId }, f.context)
+      expect(f.session.create).toHaveBeenCalledTimes(1)
+      expect(f.session.wait).toHaveBeenCalledTimes(2)
+      expect(second.content).toContain("Result 3")
+      expect(second.content).not.toContain("Result 1")
+      expect(second.content).toContain("(continued)")
+      expect(f.context.progress).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "ses_v2_1" }))
+    } finally { await f.cleanup() }
+  })
+
+  test("attaches MCP delegation to the root and uses the dedicated model", async () => {
+    const f = await setupV2()
+    f.sessions.set("ses_parent", { id: "ses_parent", projectID: "project-1", parentID: "ses_root" })
+    f.sessions.set("ses_root", { id: "ses_root", projectID: "project-1" })
+    try {
+      await f.tools.raven_mcp.execute({ query: "Find MCP docs" }, f.context)
+      expect(f.session.create.mock.calls[0][0]).toMatchObject({
+        parentID: "ses_root", agent: "raven-mcp", model: { providerID: "provider", id: "mcp" },
+      })
+    } finally { await f.cleanup() }
+  })
+
+  test("routes shell searches and global MCPs while allowing bounded filters and Raven direct tools", async () => {
+    const f = await setupV2()
+    const before = (tool: string, input: any, agent = "build") => f.hooks["tool.execute.before"]({
+      tool, input, agent, sessionID: agent === "build" ? "ses_parent" : "ses_raven", id: "call_1",
+    })
+    try {
+      await expect(before("shell", { command: "rg query ." })).rejects.toThrow("raven_seek")
+      await before("shell", { command: "git status | rg modified" })
+      await expect(before("globalDocs_search", { query: "docs" })).rejects.toThrow("raven_seek")
+      await before("grep", { pattern: "direct" }, "raven")
+      await expect(before("raven_seek", { query: "recursive" }, "raven")).rejects.toThrow("cannot be called")
+      await expect(before("raven_mcp_bridge", {})).rejects.toThrow("only available inside")
+      await before("raven_mcp_bridge", {}, "raven-mcp")
+    } finally { await f.cleanup() }
+  })
+
+  test("honors shell exclusions and injects guidance into main-agent model requests", async () => {
+    const f = await setupV2()
+    try {
+      const config = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
+      config.raven_seek.excludeTools = ["shell"]
+      writeFileSync(ravenConfigFile, JSON.stringify(config))
+      // Commands merge the latest config and apply routing changes immediately.
+      await f.commands.raven.execute({ sessionID: "ses_parent", prompt: { text: "route tool add grep" } })
+      await f.hooks["tool.execute.before"]({ tool: "shell", input: { command: "rg query ." }, agent: "build", sessionID: "ses_parent", id: "call_1" })
+      const event = { sessionID: "ses_parent", agent: "build", system: [] as any[] }
+      await f.hooks["session.context"](event)
+      expect(event.system[0].text).toContain("Raven performs search and information retrieval only")
+      const ravenEvent = { sessionID: "ses_raven", agent: "raven", system: [] as any[] }
+      await f.hooks["session.context"](ravenEvent)
+      expect(ravenEvent.system).toEqual([])
+    } finally { await f.cleanup() }
+  })
+
+  test("refreshes global MCP routing after native catalog initialization", async () => {
+    const f = await setupV2()
+    try {
+      f.ctx.mcp.transform.mock.calls[0][0]({ list: () => [["laterDocs", { type: "remote", url: "https://example.com/mcp" }]] })
+      await expect(f.hooks["tool.execute.before"]({ tool: "laterDocs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_seek")
+    } finally { await f.cleanup() }
+  })
+
+  test("runs /raven commands through RPC without queuing session input or scheduling a model turn", async () => {
+    const f = await setupV2()
+    try {
+      await f.commands.raven.execute({ sessionID: "ses_parent", prompt: { text: "seek timeout 45" } })
+      expect(f.rpcEmit.mock.calls[0]).toEqual(["notice", expect.objectContaining({ sessionID: "ses_parent", kind: "command", message: expect.stringContaining("timeout set to 45s") })])
+      const response = await f.rpcHandlers.command({ arguments: "help" })
+      expect(response.text).toContain("/raven seek model")
+      expect(f.session.synthetic).not.toHaveBeenCalled()
+      expect(f.session.prompt).not.toHaveBeenCalled()
+      expect(JSON.parse(readFileSync(ravenConfigFile, "utf-8")).raven_seek.timeout).toBe(45)
+    } finally { await f.cleanup() }
+  })
+
+  test("terminal companion displays command output and filters notices by location", async () => {
+    const command = mock(async (_input: any, _options: any) => ({ text: "Raven status" }))
+    const alert = mock(async (_input: any) => {})
+    const toast = mock((_input: any) => {})
+    const unsubscribe = mock(() => {})
+    let receive!: (event: any) => Promise<void>
+    let layer: any
+    const cleanup = RavenTui.setup({
+      client: { rpc: () => ({ command, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
+      location: { directory: "C:\\workspace" },
+      keymap: { layer: (factory: any) => { layer = factory() } },
+      ui: { dialog: { alert }, toast: { show: toast }, router: { current: () => ({ type: "session", sessionID: "ses_parent" }) } },
+    } as any)
+    await layer.commands[0].run("/raven help")
+    expect(command).toHaveBeenCalledWith({ arguments: "help" }, { location: { directory: "C:\\workspace" } })
+    expect(alert).toHaveBeenCalledWith({ title: "Raven", message: "Raven status" })
+    await receive({ location: { directory: "C:\\other" }, data: { kind: "toast", message: "Wrong location" } })
+    expect(toast).not.toHaveBeenCalled()
+    await receive({ location: { directory: "C:\\workspace" }, data: { kind: "toast", message: "MCP warning", variant: "warning" } })
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: "MCP warning" }))
+    cleanup()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  test("rejects foreign roots, the wrong agent, and switched-agent history", async () => {
+    const f = await setupV2()
+    try {
+      for (const [id, info, messages] of [
+        ["ses_foreign", { parentID: "ses_other", agent: "raven" }, [{ id: "u1", type: "user" }]],
+        ["ses_wrong", { parentID: "ses_parent", agent: "raven-mcp" }, [{ id: "u1", type: "user" }]],
+        ["ses_switched", { parentID: "ses_parent", agent: "raven", metadata: { opencodeRavenAgent: "raven" } }, [
+          { id: "s1", type: "agent-switched", agent: "build" },
+          { id: "u1", type: "user", text: "Other agent's work" },
+          { id: "s2", type: "agent-switched", agent: "raven" },
+        ]],
+      ] as const) {
+        f.sessions.set(id, { id, projectID: "project-1", ...info })
+        f.history.set(id, [...messages])
+        const result = await f.tools.raven_seek.execute({ query: "Continue", sessionId: id }, f.context)
+        expect(result.content).toContain("not a Raven child")
+      }
+      expect(f.session.prompt).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  })
+
+  test("resumes a compacted, persisted Raven child and handles compaction during a turn", async () => {
+    const f = await setupV2()
+    f.sessions.set("ses_compacted", { id: "ses_compacted", projectID: "project-1", parentID: "ses_parent", agent: "raven", metadata: { opencodeRavenAgent: "raven" } })
+    f.history.set("ses_compacted", [{ id: "summary_old", type: "compaction", text: "Summary" }])
+    f.ctx.session.wait = mock(async ({ sessionID }: any) => {
+      f.history.set(sessionID, [
+        { id: "summary_new", type: "compaction", text: "New summary" },
+        { id: "new_answer", type: "assistant", agent: "raven", content: [{ type: "text", text: "After compaction" }] },
+      ])
+      f.sessions.get(sessionID).outcome = "succeeded"
+    })
+    try {
+      const result = await f.tools.raven_seek.execute({ query: "Continue", sessionId: "ses_compacted" }, f.context)
+      expect(result.content).toContain("After compaction")
+      expect(result.content).toContain("(continued)")
+      expect(f.session.create).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  })
+
+  test("does not return a stale answer when a new turn produces no response", async () => {
+    const f = await setupV2()
+    try {
+      const first = await f.tools.raven_seek.execute({ query: "First" }, f.context)
+      f.ctx.session.wait = mock(async () => {})
+      const result = await f.tools.raven_seek.execute({ query: "Second", sessionId: first.metadata.sessionId }, f.context)
+      expect(result.content).toContain("without an assistant answer")
+      expect(result.content).not.toContain("Result 1")
+    } finally { await f.cleanup() }
+  })
+
+  test("cancellation interrupts the child and propagates the signal to the native wait", async () => {
+    const f = await setupV2()
+    const controller = new AbortController()
+    const waiting = Promise.withResolvers<void>()
+    f.ctx.session.wait = mock(async (_input: any, options?: any) => {
+      waiting.resolve()
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true }))
+    })
+    try {
+      const resultPromise = f.tools.raven_seek.execute({ query: "Cancel me" }, { ...f.context, signal: controller.signal })
+      await waiting.promise
+      controller.abort()
+      const result = await resultPromise
+      expect(result.content).toContain("cancelled")
+      expect(f.session.interrupt).toHaveBeenCalledWith({ sessionID: "ses_v2_1", resume: false }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    } finally { await f.cleanup() }
+  })
+
+  test("reports native provider failures promptly and retains the child", async () => {
+    const f = await setupV2()
+    let finish!: () => void
+    f.ctx.session.wait = mock(async () => new Promise<void>((resolve) => { finish = resolve }))
+    try {
+      const resultPromise = f.tools.raven_seek.execute({ query: "Fail fast" }, f.context)
+      while (!finish) await Promise.resolve()
+      f.emit("session.execution.failed", { sessionID: "ses_v2_1", error: { type: "APIError", message: "Quota exhausted", status: 429 } })
+      const result = await resultPromise
+      expect(result.content).toContain("rate limited")
+      expect(result.metadata.sessionId).toBe("ses_v2_1")
+      expect(f.session.interrupt).toHaveBeenCalledTimes(1)
+      finish()
+    } finally { await f.cleanup() }
+  })
+
+  test("plugin disposal cancels pending delegation and interrupts the native child", async () => {
+    const f = await setupV2()
+    const waiting = Promise.withResolvers<void>()
+    f.ctx.session.wait = mock(async (_input: any, options?: any) => {
+      waiting.resolve()
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Disposed")), { once: true }))
+    })
+    const resultPromise = f.tools.raven_seek.execute({ query: "Dispose during retrieval" }, f.context)
+    await waiting.promise
+    await f.cleanup()
+    const result = await resultPromise
+    expect(result.content).toContain("cancelled")
+    expect(f.session.interrupt).toHaveBeenCalledWith({ sessionID: "ses_v2_1", resume: false }, expect.anything())
+  })
+
+  test("auto-detects enabled, free, tool-capable native models and requests restart", async () => {
+    const f = v2Fixture()
+    mkdirSync(ravenConfigDir, { recursive: true })
+    writeFileSync(ravenConfigFile, JSON.stringify({ raven_seek: {}, raven_mcp: { onDemandMcpServers: {} } }))
+    f.ctx.model.list = mock(async () => ({ data: [
+      { id: "free-choice", providerID: "opencode", enabled: true, status: "active", time: { released: 1000 }, capabilities: { tools: true }, cost: [{ input: 0, output: 0 }], limit: { context: 100000 } },
+      { id: "disabled-free", providerID: "opencode", enabled: false, status: "active", time: { released: 2000 }, capabilities: { tools: true }, cost: [{ input: 0, output: 0 }], limit: { context: 200000 } },
+    ] as any[] }))
+    const cleanup = await RavenModule.setup(f.ctx as unknown as V2Plugin.Context) as () => Promise<void>
+    try {
+      expect(f.agents.raven).toBeUndefined()
+      const result = await f.tools.raven_seek.execute({ query: "Set up" }, f.context)
+      expect(result.content).toContain("Restart OpenCode")
+      expect(JSON.parse(readFileSync(ravenConfigFile, "utf-8")).raven_seek.model).toBe("opencode/free-choice")
+    } finally { await cleanup() }
   })
 })

@@ -1,6 +1,7 @@
 <div align="center">
   <h1>opencode-raven</h1>
   <p><strong>Keep noisy tool work out of your main OpenCode context.</strong></p>
+  <p><strong>Supports OpenCode V2 (2.0.26+) and OpenCode V1 (1.18.29+), in one package.</strong></p>
   <p>
     <a href="https://www.npmjs.com/package/opencode-raven"><img src="https://img.shields.io/npm/v/opencode-raven.svg" alt="npm version" /></a>
     <a href="https://www.npmjs.com/package/opencode-raven"><img src="https://img.shields.io/npm/dm/opencode-raven.svg" alt="npm downloads" /></a>
@@ -29,7 +30,21 @@
 
 ## Install
 
-Raven requires OpenCode 1.15.12 or newer. Add it to `opencode.jsonc`:
+**Raven 2.3 supports OpenCode V2 (2.0.26+).** OpenCode V1 (1.18.29+) remains supported in the same package—no separate plugin is needed.
+
+### OpenCode V2
+
+Use the v2 `plugins` key in `opencode.jsonc`:
+
+```jsonc
+{
+  "plugins": ["opencode-raven"]
+}
+```
+
+### OpenCode V1
+
+Use the v1 `plugin` key in `opencode.jsonc`:
 
 ```jsonc
 {
@@ -40,6 +55,16 @@ Raven requires OpenCode 1.15.12 or newer. Add it to `opencode.jsonc`:
 Restart OpenCode, then run `/raven` to verify the loaded version, model, routing, MCP health, and estimated savings. A fresh install may ask for one additional restart after selecting its model.
 
 OpenCode resolves the package from npm and caches it automatically.
+
+### Upgrading From OpenCode 1 To 2
+
+Keep using `opencode-raven`; change its OpenCode config entry from `plugin` to `plugins`. Raven's existing `~/.config/opencode/opencode-raven/raven-config.json` is shared by both versions, including models, on-demand MCPs, routing settings, and stats. Quit and restart OpenCode after upgrading.
+
+OpenCode 1 uses Raven's `server()` entrypoint; OpenCode 2 uses `setup()` and automatically loads the terminal companion. The terminal companion displays `/raven` command results in a dialog and delivers startup/update warnings as toasts, without sending a prompt to the model. The v2 server also exposes the typed `opencode-raven/rpc` command contract for other clients.
+
+The v1 minimum is 1.18.29 because earlier versions cannot load the shared object entrypoint. See OpenCode's [plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1) for the upstream lifecycle and config changes.
+
+For local development, v1 can load `file:///path/to/opencode-raven/index.ts`; v2 requires the package directory, `file:///path/to/opencode-raven`.
 
 ### First-Time Setup
 
@@ -183,7 +208,7 @@ Generated MCP metadata and main-model guidance live beside `raven-config.json`. 
 
 ## Routing
 
-Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands.
+Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands. On OpenCode 2, Raven also recognizes the native `shell` tool; `bash` and `shell` are routing aliases, so existing routing settings continue to work. Exact `excludeTools` entries use the host's actual tool name.
 
 Global MCPs are automatically routed when their OpenCode tool names use the normal `<server>_<tool>` prefix. Use a keyword for suffix-style names:
 
@@ -246,6 +271,20 @@ Review `Raven.md` and your MCP commands before using Raven in sensitive environm
 - MCP failure: run `/raven mcp`, then `/raven mcp refresh <server>` after correcting its URL, command, environment, or credentials.
 - Stale plugin version: run `/raven update`, restart OpenCode, and follow the cache-clearing instructions it prints if needed.
 - Remove Raven: delete `"opencode-raven"` from `plugin`, restart, then optionally remove `~/.config/opencode/opencode-raven/`.
+
+On OpenCode 2, remove it from `plugins` instead. `/raven update` uses v1 cache-clearing behavior only on OpenCode 1; on v2 it checks the version and provides restart/pinned-version instructions while leaving cache management to OpenCode.
+
+## Development Checks
+
+```sh
+bun install
+bun test
+bun run typecheck
+bun scripts/smoke-compat.ts v1 /path/to/opencode-v1
+bun scripts/smoke-compat.ts v2 /path/to/opencode-v2
+```
+
+The native smoke checks use isolated configuration and data directories. The v2 check uses a deterministic local model endpoint to exercise routed main-agent search, direct Raven child search, delegation completion, and command/RPC output without calling a paid model provider.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
