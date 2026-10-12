@@ -1862,7 +1862,6 @@ Then restart opencode for the model change to take effect. If the task can be co
       ravenSessions.add(sessionId)
       ravenSessionKinds.set(sessionId, kind)
       const activeSessionId = sessionId
-      context.metadata({ metadata: { sessionId } })
 
       try {
         writeFileSync(join(tmpdir(), "raven-sessions.log"), `${new Date().toISOString()} ${sessionId}\n`)
@@ -1876,6 +1875,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         }
       }
       activeRavenPrompts.add(activeSessionId)
+      context.metadata({ metadata: { sessionId } })
 
       let timer: ReturnType<typeof setTimeout> | undefined
       let promptCompleted = false
@@ -2184,9 +2184,6 @@ Then restart opencode for the model change to take effect. If the task can be co
             ravenSessionKinds.set(sessionId, "seek")
             const activeSessionId = sessionId
 
-            // Preserve the child session link for TUI clients that render it.
-            context.metadata({ metadata: { sessionId } })
-
             // Log session for debugging
             try {
               const logFile = join(tmpdir(), "raven-sessions.log")
@@ -2202,6 +2199,8 @@ Then restart opencode for the model change to take effect. If the task can be co
               }
             }
             activeRavenPrompts.add(activeSessionId)
+            // Publish only after validation and acquiring the continuation lock.
+            context.metadata({ metadata: { sessionId } })
 
             // Send the query to Raven with timeout. Provider/API errors are also
             // surfaced through message.updated events; fail as soon as one lands

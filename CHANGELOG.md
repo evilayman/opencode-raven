@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- V2 `raven_seek` and `raven_mcp` now run background child retrievals by default, with `background: false` for foreground waits.
+- Compact completion/failure messages return to the actual calling session through V2's synthetic inbox. Undelivered results survive plugin reloads; unfinished retrievals report interruption instead of replaying MCP calls.
+- Background lifecycle coverage for continuation locking, cancellation, session deletion, restart recovery, and delivery failures, plus an offline native V2 background smoke check.
+
 ### Fixed
 - Automatic MCP refresh now runs once per workspace per TUI launch, rather than repeating on plugin reactivation or returning from sessions. Manual refresh remains available.
 

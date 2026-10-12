@@ -10,13 +10,14 @@ export default {
       const results = body.messages.filter((message) => message.role === "tool")
       const delegated = results.some((message) => message.tool_call_id === "call-raven_seek")
       const searched = results.some((message) => message.tool_call_id === "call-grep")
-      const toolName = body.model === "caller" && searched && !delegated ? "raven_seek" : "grep"
-      const done = body.model === "caller" ? delegated : searched
-      const content = body.model === "caller" ? "NATIVE MAIN DONE" : "NATIVE EVIDENCE"
+      const caller = body.model.startsWith("caller")
+      const toolName = caller && searched && !delegated ? "raven_seek" : "grep"
+      const done = caller ? delegated : searched
+      const content = caller ? "NATIVE MAIN DONE" : "NATIVE EVIDENCE"
       const usage = { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 }
       if (!body.stream) return Response.json({ id: "offline", object: "chat.completion", model: body.model, choices: [{ index: 0, message: { role: "assistant", content: "Offline title" }, finish_reason: "stop" }], usage })
       const delta = done ? { content } : { tool_calls: [{ index: 0, id: `call-${toolName}`, type: "function", function: {
-        name: toolName, arguments: JSON.stringify(toolName === "grep" ? { pattern: "needle" } : { query: "Find native evidence" }),
+        name: toolName, arguments: JSON.stringify(toolName === "grep" ? { pattern: "needle" } : { query: "Find native evidence", ...(body.model === "caller" ? { background: false } : {}) }),
       } }] }
       const frame = (delta: object, finish_reason: string | null) => `data: ${JSON.stringify({ id: "offline", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta, finish_reason }], usage })}\n\n`
       return new Response(frame(delta, null) + frame({}, done ? "stop" : "tool_calls") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
@@ -25,7 +26,7 @@ export default {
     const registrations = [await ctx.provider.transform((editor) => {
       editor.add({
         info: { ...Provider.Info.empty(providerID), package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `http://127.0.0.1:${server.port}/v1`, apiKey: "offline-fixture" } },
-        models: ["caller", "retrieval"].map((id) => Model.Info.default(providerID, Model.ID.make(id))),
+        models: ["caller", "caller-background", "retrieval"].map((id) => Model.Info.default(providerID, Model.ID.make(id))),
       })
     })]
     registrations.push(await ctx.agent.transform((editor) => {

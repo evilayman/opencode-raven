@@ -104,7 +104,28 @@ try {
       throw new Error(`Native routing/delegation output mismatch: ${JSON.stringify(toolParts)}\n${logs}`)
     }
     await client.session.remove({ sessionID: session.id }, options)
-    console.log("v2: native agents, commands/RPC, blocked main search, direct child search, and completed Raven delegation passed (offline model)")
+    const background = await client.session.create({ location: { directory: workspace }, agent: "build", model: { providerID: "raven-smoke", id: "caller-background" } }, options)
+    await client.session.prompt({ sessionID: background.id, text: "Run the background delegation smoke check" }, options)
+    await client.session.wait({ sessionID: background.id }, options)
+    let backgroundContext = await client.session.context({ sessionID: background.id }, options)
+    for (let attempt = 0; attempt < 100 && !backgroundContext.some((message) => message.type === "synthetic" && message.text.includes("NATIVE EVIDENCE")); attempt++) {
+      await Bun.sleep(100)
+      backgroundContext = await client.session.context({ sessionID: background.id }, options)
+    }
+    const acknowledgement = backgroundContext.filter((message) => message.type === "assistant").flatMap((message) => message.content).find((part) => part.type === "tool" && part.name === "raven_seek")
+    if (acknowledgement?.type !== "tool" || acknowledgement.state.status !== "completed" || !acknowledgement.state.content.some((part) => part.type === "text" && part.text.includes("started in the background"))
+      || !backgroundContext.some((message) => message.type === "synthetic" && message.text.includes("NATIVE EVIDENCE"))) {
+      throw new Error(`Native background delegation failed: ${JSON.stringify(backgroundContext)}\n${logs}`)
+    }
+    const notice = backgroundContext.find((message) => message.type === "synthetic" && message.text.includes("NATIVE EVIDENCE"))
+    if (notice?.type !== "synthetic") throw new Error("Missing native background completion")
+    // Retried delivery after an ambiguous disconnect must not duplicate evidence.
+    await client.session.synthetic({ sessionID: background.id, id: notice.id, text: notice.text, delivery: "steer", resume: true }, options)
+    await client.session.wait({ sessionID: background.id }, options)
+    const retried = await client.session.context({ sessionID: background.id }, options)
+    if (retried.filter((message) => message.type === "synthetic" && message.id === notice.id).length !== 1) throw new Error("Duplicate background result admission")
+    await client.session.remove({ sessionID: background.id }, options)
+    console.log("v2: native agents, commands/RPC, routing, foreground and background Raven delegation passed (offline model)")
     proc.kill()
     await proc.exited
     await Promise.all(collectors)

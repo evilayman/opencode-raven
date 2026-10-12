@@ -100,6 +100,24 @@ In this run, Raven handled the search-heavy web research in a child session and 
 
 The main model receives Raven's final answer instead of its raw tool output. Each result includes a Raven session ID that the main agent can pass back for a context-aware follow-up. Child sessions remain available in OpenCode's session/subagent view for inspection.
 
+### Background Retrieval (OpenCode V2)
+
+On V2, `raven_seek` and `raven_mcp` **run in the background by default**. The initial response contains a child-session handle, not the findings. The calling agent can continue independent work; Raven delivers compact findings or a failure notice to that same calling session when retrieval finishes, including when the caller is itself a child session.
+
+```text
+raven_seek(query="Find the current API documentation")
+raven_mcp(query="Retrieve library examples", background=true)
+raven_seek(query="Find the definition needed for my next step", background=false)
+```
+
+Use `background: false` when the next step depends on the answer. Do not poll, repeat a pending retrieval, or finalize conclusions that need its findings. Wait for the completion message before reusing its `sessionId` for a follow-up.
+
+Background retrieval keeps Raven's configured timeouts, permissions, continuation checks, and context estimates. Returning the handle ends the calling tool, not the child retrieval. To stop it, open the returned child session and interrupt it. Deleting the calling session also cancels its pending retrievals.
+
+Results are delivered through V2's durable synthetic inbox input, which can resume the calling agent and therefore cause another model turn. Undelivered results are retained in plugin storage and retried when that location's plugin next loads. A plugin/service restart cancels running work; Raven reports the interruption instead of automatically replaying searches or potentially stateful MCP calls. V1 keeps its existing foreground behavior.
+
+Raven manages its own background child sessions using the public plugin APIs. This does not add native Ctrl+B background support to Raven's custom tools.
+
 For direct search control, mention `@Raven` in any chat. This sends the request to the search agent, but it is optional and not required for automatic routing.
 
 Under the hood, Raven registers two public delegation tools and one internal bridge:

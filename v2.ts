@@ -3,6 +3,7 @@ import type { PluginInput, Hooks, ToolContext as V1ToolContext } from "@opencode
 import type { SessionMessageInfo, SessionInfo } from "@opencode/client"
 import { z } from "zod"
 import createRavenRuntime from "./raven-core"
+import { backgroundDelegations } from "./background"
 import { RavenRpc, mcpRefreshArguments, mcpRefreshToast } from "./rpc"
 
 type Context = Plugin.Context
@@ -54,6 +55,7 @@ function legacyMessages(messages: readonly SessionMessageInfo[], session: Sessio
 export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
   const registrations: Registration[] = []
   const controller = new AbortController()
+  const background = backgroundDelegations(ctx, controller.signal)
   const location = { directory: ctx.location.directory }
   const agents: Record<string, AgentDefinition> = {}
   const activeSessions = new Set<string>()
@@ -173,6 +175,7 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     controller.abort()
     if (startupTimer) clearTimeout(startupTimer)
     await Promise.allSettled(running.map((sessionID) => ctx.session.interrupt({ sessionID, resume: false }, { signal: AbortSignal.timeout(5000) })))
+    await background.dispose()
     await Promise.allSettled(registrations.reverse().map((registration) => registration.dispose()))
     await runtime?.dispose()
     await eventPump
@@ -239,9 +242,12 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     const tools: NonNullable<Hooks["tool"]> = raven.tool
     registrations.push(await ctx.tool.transform((editor) => {
       for (const [name, definition] of Object.entries(tools)) {
-        const schema = z.object(definition.args)
+        const delegation = name === "raven_seek" || name === "raven_mcp"
+        const schema = z.object({ ...definition.args, ...(delegation ? {
+          background: z.boolean().optional().describe("Defaults to true. Return immediately and deliver compact findings to this calling session on completion. Set false to wait when the next step depends on these findings."),
+        } : {}) })
         editor.add({
-          name, description: definition.description,
+          name, description: definition.description + (delegation ? " Runs in the background by default on V2; completion findings arrive automatically. Use background: false to wait for dependent evidence." : ""),
           input: z.toJSONSchema(schema),
           options: { permission: name, codemode: false },
           async execute(input, context) {
@@ -259,7 +265,11 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
               },
               async ask() { throw new Error("Raven tools do not request additional permissions") },
             }
-            const result = await definition.execute(schema.parse(input), legacyContext)
+            const parsed: Record<string, any> = schema.parse(input)
+            const execute = (toolContext: V1ToolContext) => definition.execute(parsed, toolContext)
+            const result = delegation && parsed.background !== false
+              ? await background.run(name, String(parsed.query), legacyContext, execute)
+              : await execute(legacyContext)
             await progress
             return typeof result === "string" ? { content: result } : {
               content: result.output,
@@ -289,6 +299,7 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       await raven["chat.message"]({ sessionID: event.sessionID, agent: event.agent }, {})
       if (event.agent === "raven") return
       event.system.push({ type: "text", text: event.agent === "raven-mcp" ? raven.mcpGuidance() : raven.guidance() })
+      if (event.agent !== "raven-mcp") event.system.push({ type: "text", text: "On OpenCode V2, raven_seek and raven_mcp run in the background by default. Their initial response is a session handle, not findings. Continue independent work while waiting for the automatic completion message. Do not poll or repeat pending retrievals, and do not finalize dependent conclusions without their findings. Set background: false if your next step requires the answer. Follow-ups must wait until the earlier request finishes." })
     }))
     registrations.push(await ctx.session.hook("retry", async (event) => {
       await raven.event({ event: {
@@ -326,6 +337,7 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
             await raven.event({ event: { type: event.type, properties: { info: { ...data, id: data.sessionID } } } })
           } else if (event.type === "session.deleted") {
             const data = event.data
+            await background.deleted(data.sessionID)
             await raven.event({ event: { type: event.type, properties: { info: { id: data.sessionID } } } })
           } else if (event.type === "session.execution.failed" || event.type === "session.retry.scheduled") {
             const data = event.data
@@ -342,6 +354,7 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     await ctx.agent.reload()
     await ctx.tool.reload()
     await ctx.command.reload()
+    await background.recover()
     startupTimer = setTimeout(() => {
       void raven.event({ event: { type: "raven.ready" } }).catch((error) => console.error("Raven startup failed:", error))
     }, 3000)

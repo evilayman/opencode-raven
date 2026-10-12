@@ -503,6 +503,7 @@ function v2Fixture() {
   const registrations: Array<{ dispose: ReturnType<typeof mock> }> = []
   const sessions = new Map<string, any>([["ses_parent", { id: "ses_parent", projectID: "project-1" }]])
   const history = new Map<string, any[]>()
+  const storage = new Map<string, any>()
   let pendingEvent: ((value: any) => void) | undefined
   const register = () => {
     const registration = { dispose: mock(async () => {}) }
@@ -546,6 +547,12 @@ function v2Fixture() {
   const ctx = {
     app: { version: "2.0.26" },
     location: { directory: "C:\\workspace", project: { id: "project-1", directory: "C:\\workspace" } },
+    storage: {
+      get: mock(async (key: string) => storage.get(key)),
+      set: mock(async (key: string, value: any) => { storage.set(key, structuredClone(value)) }),
+      remove: mock(async (key: string) => { storage.delete(key) }),
+      scan: mock(async ({ prefix }: any) => ({ entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) })),
+    },
     agent: {
       transform: mock(async (callback: any) => {
         callback({
@@ -599,7 +606,7 @@ function v2Fixture() {
     },
   }
   return {
-    ctx, tools, agents, commands, hooks, sessions, history, session, registrations, emit, rpcHandlers, rpcEmit,
+    ctx, tools, agents, commands, hooks, sessions, history, storage, session, registrations, emit, rpcHandlers, rpcEmit,
     context: {
       sessionID: "ses_parent", messageID: "msg_1", id: "call_1", agent: "build",
       signal: new AbortController().signal, progress: mock(async () => {}),
@@ -618,6 +625,224 @@ async function setupV2(fixture = v2Fixture(), servers: Record<string, any> = {})
 }
 
 describe("OpenCode 2 integration", () => {
+  test("defaults both retrieval tools to background and delivers once to the calling session", async () => {
+    for (const name of ["raven_seek", "raven_mcp"]) {
+      const f = await setupV2()
+      const waiting = Promise.withResolvers<void>()
+      const finish = Promise.withResolvers<void>()
+      const delivered = Promise.withResolvers<void>()
+      const originalWait = f.session.wait.getMockImplementation()!
+      f.session.wait.mockImplementation(async (input: any, options: any) => {
+        waiting.resolve()
+        await finish.promise
+        await originalWait(input, options)
+      })
+      f.session.synthetic.mockImplementation(async () => { delivered.resolve(); return { id: "msg_notice" } })
+      const caller = new AbortController()
+      try {
+        // Child attaches to the root, but completion returns to the actual caller.
+        f.sessions.set("ses_parent", { id: "ses_parent", projectID: "project-1", parentID: "ses_root" })
+        f.sessions.set("ses_root", { id: "ses_root", projectID: "project-1" })
+        const result = await f.tools[name].execute({ query: "Independent research" }, { ...f.context, signal: caller.signal })
+        await waiting.promise
+        expect(result.content).toContain("started in the background")
+        expect(result.content).not.toContain("Result")
+        expect(result.metadata.background).toBe(true)
+        expect(f.session.synthetic).not.toHaveBeenCalled()
+        expect(f.session.create.mock.calls[0][0].parentID).toBe("ses_root")
+        expect(f.storage.size).toBe(1)
+        const progressCount = f.context.progress.mock.calls.length
+        // The tool's lifetime must not cancel an already detached child.
+        caller.abort()
+        finish.resolve()
+        await delivered.promise
+        expect(f.session.synthetic).toHaveBeenCalledTimes(1)
+        expect(f.session.synthetic.mock.calls[0][0]).toMatchObject({
+          sessionID: "ses_parent", delivery: "steer", resume: true,
+          text: expect.stringContaining("Result 1"),
+          metadata: { opencodeRavenBackground: true, sessionId: result.metadata.sessionId },
+        })
+        expect(f.context.progress.mock.calls.length).toBe(progressCount)
+      } finally { finish.resolve(); await f.cleanup() }
+      expect(f.storage.size).toBe(0)
+    }
+  })
+
+  test("does not acknowledge or notify a busy continuation or invalid session", async () => {
+    const f = await setupV2()
+    const finish = Promise.withResolvers<void>()
+    const originalWait = f.session.wait.getMockImplementation()!
+    f.session.wait.mockImplementation(async (input: any, options: any) => { await finish.promise; await originalWait(input, options) })
+    try {
+      const first = await f.tools.raven_seek.execute({ query: "First" }, f.context)
+      const second = await f.tools.raven_seek.execute({ query: "Too soon", sessionId: first.metadata.sessionId }, f.context)
+      expect(second.content).toContain("already handling a request")
+      expect(second.metadata.background).toBeUndefined()
+      const invalid = await f.tools.raven_seek.execute({ query: "Invalid", sessionId: "missing" }, f.context)
+      expect(invalid.content).toContain("not found")
+      expect(f.session.prompt).toHaveBeenCalledTimes(1)
+      expect(f.storage.size).toBe(1)
+      expect(f.session.synthetic).not.toHaveBeenCalled()
+    } finally { finish.resolve(); await f.cleanup() }
+  })
+
+  test("background completion preserves continuation and error handling", async () => {
+    const f = await setupV2()
+    const notices: any[] = []
+    let delivered = Promise.withResolvers<void>()
+    f.session.synthetic.mockImplementation(async (input: any) => { notices.push(input); delivered.resolve(); return { id: input.id } })
+    try {
+      const first = await f.tools.raven_seek.execute({ query: "First", background: true }, f.context)
+      await delivered.promise
+      delivered = Promise.withResolvers<void>()
+      const second = await f.tools.raven_seek.execute({ query: "Follow up", sessionId: first.metadata.sessionId }, f.context)
+      await delivered.promise
+      expect(second.metadata.sessionId).toBe(first.metadata.sessionId)
+      expect(f.session.create).toHaveBeenCalledTimes(1)
+      expect(notices[1].text).toContain("Result 3")
+      expect(notices[1].text).toContain("(continued)")
+      expect(notices[0].id).not.toBe(notices[1].id)
+
+      delivered = Promise.withResolvers<void>()
+      const waiting = Promise.withResolvers<void>()
+      f.session.wait.mockImplementation(async (input: any, options: any) => {
+        waiting.resolve()
+        await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true }))
+      })
+      const failed = await f.tools.raven_mcp.execute({ query: "Provider failure" }, f.context)
+      await waiting.promise
+      f.emit("session.execution.failed", { sessionID: failed.metadata.sessionId, error: { type: "APIError", message: "Quota exhausted", status: 429 } })
+      await delivered.promise
+      expect(notices[2].text).toContain("rate limited")
+      expect(notices[2].text).toContain(failed.metadata.sessionId)
+      expect(f.session.interrupt).toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  })
+
+  test("background disposal retains cancellation for recovery without waking the parent", async () => {
+    const f = await setupV2()
+    const waiting = Promise.withResolvers<void>()
+    f.session.wait.mockImplementation(async (_input: any, options: any) => {
+      waiting.resolve()
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Disposed")), { once: true }))
+    })
+    await f.tools.raven_seek.execute({ query: "Restart during research" }, f.context)
+    await waiting.promise
+    await f.cleanup()
+    expect(f.session.synthetic).not.toHaveBeenCalled()
+    expect(f.session.interrupt).toHaveBeenCalled()
+    expect([...f.storage.values()][0].output).toContain("cancelled")
+    const recovered = await setupV2(f)
+    try {
+      expect(recovered.session.synthetic).toHaveBeenCalledTimes(1)
+      expect(recovered.session.synthetic.mock.calls[0][0].text).toContain("cancelled")
+      expect(recovered.storage.size).toBe(0)
+      expect(recovered.session.prompt).toHaveBeenCalledTimes(1) // No replay on recovery.
+    } finally { await recovered.cleanup() }
+  })
+
+  test("retains completed findings when delivery fails and retries with the same inbox ID", async () => {
+    const f = await setupV2()
+    const attempted = Promise.withResolvers<void>()
+    f.session.synthetic.mockImplementation(async () => { attempted.resolve(); throw new Error("Disconnected") })
+    const originalError = console.error
+    console.error = () => {}
+    try {
+      await f.tools.raven_seek.execute({ query: "Retain findings" }, f.context)
+      await attempted.promise
+      await f.cleanup()
+      expect(f.storage.size).toBe(1)
+      const id = [...f.storage.values()][0].id
+      f.session.synthetic.mockImplementation(async () => ({ id: "msg_notice" }))
+      const recovered = await setupV2(f)
+      try {
+        expect(f.session.synthetic.mock.calls[1][0].id).toBe(id)
+        expect(f.session.synthetic.mock.calls[1][0].text).toContain("Result 1")
+        expect(f.storage.size).toBe(0)
+        expect(f.session.prompt).toHaveBeenCalledTimes(1)
+      } finally { await recovered.cleanup() }
+    } finally { console.error = originalError; await f.cleanup() }
+  })
+
+  test("deleting the caller cancels background work without notifying a deleted session", async () => {
+    const f = await setupV2()
+    const waiting = Promise.withResolvers<void>()
+    const interrupted = Promise.withResolvers<void>()
+    f.session.wait.mockImplementation(async (_input: any, options: any) => {
+      waiting.resolve()
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Deleted")), { once: true }))
+    })
+    f.session.interrupt.mockImplementation(async () => { interrupted.resolve() })
+    try {
+      await f.tools.raven_seek.execute({ query: "Delete caller" }, f.context)
+      await waiting.promise
+      f.emit("session.deleted", { sessionID: "ses_parent" })
+      await interrupted.promise
+    } finally { await f.cleanup() }
+    expect(f.session.synthetic).not.toHaveBeenCalled()
+    expect(f.storage.size).toBe(0)
+  })
+
+  test("deleting only the child delivers a cancellation notice to its caller", async () => {
+    const f = await setupV2()
+    const waiting = Promise.withResolvers<void>()
+    const delivered = Promise.withResolvers<void>()
+    f.session.wait.mockImplementation(async (_input: any, options: any) => {
+      waiting.resolve()
+      await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Deleted")), { once: true }))
+    })
+    f.session.synthetic.mockImplementation(async () => { delivered.resolve(); return { id: "msg_notice" } })
+    try {
+      const result = await f.tools.raven_seek.execute({ query: "Delete child" }, f.context)
+      await waiting.promise
+      f.emit("session.deleted", { sessionID: result.metadata.sessionId })
+      await delivered.promise
+      expect(f.session.synthetic.mock.calls[0][0]).toMatchObject({ sessionID: "ses_parent", text: expect.stringContaining("cancelled") })
+    } finally { await f.cleanup() }
+    expect(f.storage.size).toBe(0)
+  })
+
+  test("recovery reports unfinished work after a crash instead of replaying MCP calls", async () => {
+    const f = await setupV2()
+    const delivered = Promise.withResolvers<void>()
+    f.session.synthetic.mockImplementation(async () => { delivered.resolve(); return { id: "msg_notice" } })
+    await f.tools.raven_mcp.execute({ query: "Recover crash" }, f.context)
+    await delivered.promise
+    await f.cleanup()
+    const [input] = f.session.synthetic.mock.calls[0]
+    // Simulate a crash after admission but before recording a completed answer.
+    // The key is location-scoped exactly as it was for the running request.
+    const key = f.ctx.storage.set.mock.calls[0][0]
+    f.storage.set(key, { id: input.id, parentID: "ses_parent", sessionId: input.metadata.sessionId, tool: "raven_mcp", query: "Recover crash" })
+    const recovered = await setupV2(f)
+    try {
+      expect(f.session.synthetic.mock.calls[1][0].text).toContain("interrupted by a plugin/service restart")
+      expect(f.session.prompt).toHaveBeenCalledTimes(1)
+      expect(f.session.interrupt).toHaveBeenCalledWith({ sessionID: input.metadata.sessionId, resume: false }, expect.anything())
+      expect(f.storage.size).toBe(0)
+    } finally { await recovered.cleanup() }
+  })
+
+  test("persistence failures cancel the child rather than returning a false background handle", async () => {
+    const f = await setupV2()
+    const originalError = console.error
+    console.error = () => {}
+    f.ctx.storage.set.mockImplementation(async () => { throw new Error("Storage unavailable") })
+    f.session.wait.mockImplementation(async (_input: any, options: any) => {
+      await new Promise<void>((_resolve, reject) => {
+        if (options.signal.aborted) reject(new Error("Aborted"))
+        else options.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true })
+      })
+    })
+    try {
+      const result = await f.tools.raven_seek.execute({ query: "Storage failure" }, f.context)
+      expect(result.content).toContain("Could not start")
+      expect(result.metadata.background).toBeUndefined()
+      expect(f.session.synthetic).not.toHaveBeenCalled()
+    } finally { await f.cleanup(); console.error = originalError }
+    expect(f.session.interrupt).toHaveBeenCalled()
+  })
+
   test("exposes one dual entrypoint and registers native agents, tools, permissions, and commands", async () => {
     expect(RavenModule.id).toBe("opencode-raven")
     expect(typeof RavenModule.server).toBe("function")
@@ -641,14 +866,14 @@ describe("OpenCode 2 integration", () => {
   test("waits for completion and returns the new answer and native child-session metadata", async () => {
     const f = await setupV2()
     try {
-      const first = await f.tools.raven_seek.execute({ query: "Find evidence" }, f.context)
+      const first = await f.tools.raven_seek.execute({ query: "Find evidence", background: false }, f.context)
       expect(first.content).toContain("Result 1")
       expect(first.metadata.sessionId).toBe("ses_v2_1")
       expect(f.session.create.mock.calls[0]).toEqual([expect.objectContaining({
         parentID: "ses_parent", agent: "raven", model: { providerID: "provider", id: "search" },
         metadata: { opencodeRavenAgent: "raven" },
       }), expect.objectContaining({ signal: expect.any(AbortSignal) })])
-      const second = await f.tools.raven_seek.execute({ query: "Follow up", sessionId: first.metadata.sessionId }, f.context)
+      const second = await f.tools.raven_seek.execute({ query: "Follow up", sessionId: first.metadata.sessionId, background: false }, f.context)
       expect(f.session.create).toHaveBeenCalledTimes(1)
       expect(f.session.wait).toHaveBeenCalledTimes(2)
       expect(second.content).toContain("Result 3")
@@ -663,7 +888,7 @@ describe("OpenCode 2 integration", () => {
     f.sessions.set("ses_parent", { id: "ses_parent", projectID: "project-1", parentID: "ses_root" })
     f.sessions.set("ses_root", { id: "ses_root", projectID: "project-1" })
     try {
-      await f.tools.raven_mcp.execute({ query: "Find MCP docs" }, f.context)
+      await f.tools.raven_mcp.execute({ query: "Find MCP docs", background: false }, f.context)
       expect(f.session.create.mock.calls[0][0]).toMatchObject({
         parentID: "ses_root", agent: "raven-mcp", model: { providerID: "provider", id: "mcp" },
       })
@@ -1018,7 +1243,7 @@ describe("OpenCode 2 integration", () => {
       f.sessions.get(sessionID).outcome = "succeeded"
     })
     try {
-      const result = await f.tools.raven_seek.execute({ query: "Continue", sessionId: "ses_compacted" }, f.context)
+      const result = await f.tools.raven_seek.execute({ query: "Continue", sessionId: "ses_compacted", background: false }, f.context)
       expect(result.content).toContain("After compaction")
       expect(result.content).toContain("(continued)")
       expect(f.session.create).not.toHaveBeenCalled()
@@ -1028,9 +1253,9 @@ describe("OpenCode 2 integration", () => {
   test("does not return a stale answer when a new turn produces no response", async () => {
     const f = await setupV2()
     try {
-      const first = await f.tools.raven_seek.execute({ query: "First" }, f.context)
+      const first = await f.tools.raven_seek.execute({ query: "First", background: false }, f.context)
       f.ctx.session.wait = mock(async () => {})
-      const result = await f.tools.raven_seek.execute({ query: "Second", sessionId: first.metadata.sessionId }, f.context)
+      const result = await f.tools.raven_seek.execute({ query: "Second", sessionId: first.metadata.sessionId, background: false }, f.context)
       expect(result.content).toContain("without an assistant answer")
       expect(result.content).not.toContain("Result 1")
     } finally { await f.cleanup() }
@@ -1045,7 +1270,7 @@ describe("OpenCode 2 integration", () => {
       await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true }))
     })
     try {
-      const resultPromise = f.tools.raven_seek.execute({ query: "Cancel me" }, { ...f.context, signal: controller.signal })
+      const resultPromise = f.tools.raven_seek.execute({ query: "Cancel me", background: false }, { ...f.context, signal: controller.signal })
       await waiting.promise
       controller.abort()
       const result = await resultPromise
@@ -1059,7 +1284,7 @@ describe("OpenCode 2 integration", () => {
     let finish!: () => void
     f.ctx.session.wait = mock(async () => new Promise<void>((resolve) => { finish = resolve }))
     try {
-      const resultPromise = f.tools.raven_seek.execute({ query: "Fail fast" }, f.context)
+      const resultPromise = f.tools.raven_seek.execute({ query: "Fail fast", background: false }, f.context)
       while (!finish) await Promise.resolve()
       f.emit("session.execution.failed", { sessionID: "ses_v2_1", error: { type: "APIError", message: "Quota exhausted", status: 429 } })
       const result = await resultPromise
@@ -1077,7 +1302,7 @@ describe("OpenCode 2 integration", () => {
       waiting.resolve()
       await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Disposed")), { once: true }))
     })
-    const resultPromise = f.tools.raven_seek.execute({ query: "Dispose during retrieval" }, f.context)
+    const resultPromise = f.tools.raven_seek.execute({ query: "Dispose during retrieval", background: false }, f.context)
     await waiting.promise
     await f.cleanup()
     const result = await resultPromise
