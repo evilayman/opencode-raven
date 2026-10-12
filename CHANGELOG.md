@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.3.2
 
 ### Added
 - V2 `raven_seek` and `raven_mcp` now run background child retrievals by default, with `background: false` for foreground waits.
