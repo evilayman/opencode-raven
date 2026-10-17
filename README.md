@@ -230,6 +230,33 @@ Per-server `timeout` values are milliseconds. Local servers inherit the OpenCode
 
 Generated MCP metadata and main-model guidance live beside `raven-config.json`. Refresh them with `/raven mcp refresh [server]`.
 
+### Optional Parallel Search MCP
+
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) adds web search and page fetching without an account or API key. Anonymous search uses Fast mode; free access is intended for light use and has rate limits.
+
+To enable it, merge this `parallel` entry into `raven_mcp.onDemandMcpServers` in `~/.config/opencode/opencode-raven/raven-config.json`. Keep your existing server entries and other settings, including your selected models:
+
+```json
+{
+  "raven_mcp": {
+    "onDemandMcpServers": {
+      "parallel": {
+        "type": "remote",
+        "url": "https://search.parallel.ai/mcp",
+        "headers": { "User-Agent": "opencode-raven" },
+        "description": "Web search and page fetching through Parallel."
+      }
+    }
+  }
+}
+```
+
+Restart OpenCode, then run `/raven mcp` to check that `parallel` is ready. If discovery fails, run `/raven mcp refresh parallel` to retry.
+
+Ask OpenCode: "Use the parallel MCP to find the current OpenCode plugin migration guide, fetch the relevant page, and return the migration steps with source URLs."
+
+Raven handles this through `raven_mcp`; its internal bridge discovers `web_search` and `web_fetch` without registering their schemas globally. Adding this entry leaves the bundled servers available and does not change search routing. To disable it, set `enabled: false` on the `parallel` entry and restart OpenCode.
+
 ## Routing
 
 Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands. On OpenCode 2, Raven also recognizes the native `shell` tool; `bash` and `shell` are routing aliases, so existing routing settings continue to work. Exact `excludeTools` entries use the host's actual tool name.
