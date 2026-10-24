@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.5
+
+### Changed
+- OpenCode 2 now auto-approves any otherwise-asking permission inside Raven Search and Raven MCP, including skill loading, instead of maintaining a tool allowlist. Explicit denials, edit and nested-delegation restrictions, and other agents' permissions remain unchanged.
+- Documented that Raven's unattended execution is trusted rather than read-only: shell commands and MCP tools can modify the system or external services.
+
 ## 2.3.4
 
 ### Fixed

@@ -58,7 +58,6 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
   const background = backgroundDelegations(ctx, controller.signal)
   const location = { directory: ctx.location.directory }
   const agents: Record<string, AgentDefinition> = {}
-  const globalMcpToolPrefixes = new Set<string>()
   const activeSessions = new Set<string>()
   let emitNotice: (notice: z.infer<typeof RavenRpc.events.notice.schema>) => Promise<void> = async () => {}
   let runtime: Runtime | undefined
@@ -199,8 +198,6 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     registrations.push(await ctx.mcp.transform((editor) => {
       const names = editor.list().filter(([, server]) => !server.disabled).map(([name]) => name)
       raven.globalMcpRouting(names)
-      globalMcpToolPrefixes.clear()
-      for (const name of names) globalMcpToolPrefixes.add(`${name.replace(/[^a-zA-Z0-9_-]/g, "_")}_`)
     }))
 
     async function executeCommand(raw: string) {
@@ -215,17 +212,11 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     registrations.push(rpc)
     emitNotice = (notice) => rpc.events.emit("notice", notice)
 
-    // Approve specific retrieval actions at execution time, not by adding a
-    // blanket agent allow rule that changes Raven's entire tool policy.
-    // Explicit configured denials are final and do not invoke this hook.
+    // Approve Raven's asks at execution time; explicit denials remain final.
     registrations.push(await ctx.permission.hook("evaluate", (event) => {
       if (event.effect !== "ask") return
       const delegation = event.action === "raven_seek" || event.action === "raven_mcp"
-      const retrieval = (event.agent === "raven" || event.agent === "raven-mcp") && (
-        event.action === "webfetch" || event.action === "websearch" || event.action === "fetch"
-        || [...globalMcpToolPrefixes].some((prefix) => event.action.startsWith(prefix))
-      )
-      if (delegation || retrieval) {
+      if (delegation || event.agent === "raven" || event.agent === "raven-mcp") {
         event.effect = "allow"
       }
     }))

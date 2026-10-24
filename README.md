@@ -138,7 +138,7 @@ Under the hood, Raven registers two public delegation tools and one internal bri
 | `raven_mcp` | Creates or resumes a Raven MCP session for online research using built-in web tools, global or on-demand MCPs, and local retrieval tools when needed for context. No MCP is required. |
 | `raven_mcp_bridge` | Internal bridge used only by the Raven MCP agent. |
 
-On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Inside either Raven agent, it also auto-approves `webfetch`, `websearch`, `fetch`, and tools belonging to enabled globally configured MCP servers. Explicit deny rules still apply. These execution-time approvals do not add a blanket agent permission or change the main agent's tool permissions, model request, or access restrictions on the internal MCP bridge.
+On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Inside either Raven agent, any permission check that would otherwise ask is automatically approved, including skill loading and MCP calls. Explicit deny rules still apply. These execution-time approvals do not add a blanket agent permission or change the main agent's tool permissions, model request, or access restrictions on the internal MCP bridge.
 
 For a related follow-up, the main agent can reuse the ID returned by the earlier call:
 
@@ -288,7 +288,7 @@ Raven is optimized for autonomous retrieval:
 
 - Raven Search has read, search, unrestricted shell, external-directory, and globally configured MCP access without normal permission prompts.
 - Raven MCP has the same retrieval access as Raven Search, plus the internal on-demand MCP bridge. It can use built-in web tools without an MCP and inspect local files for research context.
-- Both agents deny edit tools and nested delegation, but shell access is not a read-only sandbox and can modify the system.
+- Both agents deny edit tools and nested delegation, but shell access is not a read-only sandbox and can modify the system. MCP tools may also modify external systems; V2 auto-approval trusts the Raven agents rather than enforcing read-only execution.
 - Queries are sent to Raven's configured model provider.
 - Remote MCP requests are sent to their services; local MCP entries launch local commands and inherit environment values.
 - Startup performs an npm update check and probes enabled on-demand MCPs.

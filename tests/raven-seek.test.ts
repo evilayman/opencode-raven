@@ -991,13 +991,14 @@ describe("OpenCode 2 integration", () => {
     } finally { await f.cleanup() }
   })
 
-  test("approves web and configured global MCP execution only in Raven agents without changing their policies", async () => {
+  test("approves all Raven asks without changing denials, other agents, or configured policies", async () => {
     const f = await setupV2()
     const permissions = Object.fromEntries(["raven", "raven-mcp"].map((agent) => [agent, [...f.agents[agent].permissions]]))
+    const actions = ["skill", "webfetch", "websearch", "fetch", "globalDocs_search", "execute", "edit", "shell", "read", "unknownMcp_search", "raven_mcp_bridge", "subagent"]
     try {
       for (const agent of ["raven", "raven-mcp"]) {
         expect(permissions[agent]).not.toContainEqual({ action: "*", resource: "*", effect: "allow" })
-        for (const action of ["webfetch", "websearch", "fetch", "globalDocs_search"]) {
+        for (const action of actions) {
           const event = { agent, action, effect: "ask" }
           await f.hooks["permission.evaluate"](event)
           expect(event.effect).toBe("allow")
@@ -1005,15 +1006,10 @@ describe("OpenCode 2 integration", () => {
           await f.hooks["permission.evaluate"](denied)
           expect(denied.effect).toBe("deny")
         }
-        for (const action of ["execute", "edit", "shell", "read", "unknownMcp_search", "raven_mcp_bridge"]) {
-          const event = { agent, action, effect: "ask" }
-          await f.hooks["permission.evaluate"](event)
-          expect(event.effect).toBe("ask")
-        }
         expect(f.agents[agent].permissions).toEqual(permissions[agent])
       }
-      for (const action of ["webfetch", "websearch", "fetch", "globalDocs_search"]) {
-        for (const agent of [undefined, "build"]) {
+      for (const action of actions) {
+        for (const agent of [undefined, "build", "general", "raven-other"]) {
           const other = { agent, action, effect: "ask" }
           await f.hooks["permission.evaluate"](other)
           expect(other.effect).toBe("ask")
@@ -1022,21 +1018,18 @@ describe("OpenCode 2 integration", () => {
     } finally { await f.cleanup() }
   })
 
-  test("retrieval approval follows the enabled global MCP catalog and normalizes server names", async () => {
+  test("Raven approval is independent of the MCP catalog while main-agent routing follows it", async () => {
     const f = await setupV2()
     try {
       f.ctx.mcp.transform.mock.calls[0][0]({ list: () => [
         ["exa.docs", { type: "remote", url: "https://example.com/mcp" }],
         ["disabledDocs", { type: "remote", url: "https://example.com/mcp", disabled: true }],
       ] })
-      for (const [action, expected] of [
-        ["exa_docs_search", "allow"], ["globalDocs_search", "ask"],
-        ["disabledDocs_search", "ask"], ["exa_docsOther_search", "ask"],
-      ]) {
+      for (const action of ["exa_docs_search", "globalDocs_search", "disabledDocs_search", "exa_docsOther_search"]) {
         for (const agent of ["raven", "raven-mcp"]) {
           const event = { agent, action, effect: "ask" }
           await f.hooks["permission.evaluate"](event)
-          expect(event.effect).toBe(expected)
+          expect(event.effect).toBe("allow")
         }
       }
       await expect(f.hooks["tool.execute.before"]({ tool: "exa_docs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_mcp")
