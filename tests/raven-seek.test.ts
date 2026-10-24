@@ -176,6 +176,14 @@ describe("Raven configuration migration", () => {
     await hooks.config!(config)
     expect(config.agent.raven.disable).toBe(true)
     expect(config.agent["raven-mcp"].model).toBe("provider/manual")
+    await (hooks as any)["tool.execute.before"](
+      { tool: "grep", sessionID: "ses_parent", callID: "call_local" },
+      { args: { pattern: "direct while Search is unconfigured" } },
+    )
+    await expect((hooks as any)["tool.execute.before"](
+      { tool: "websearch", sessionID: "ses_parent", callID: "call_online" },
+      { args: { query: "online while Search is unconfigured" } },
+    )).rejects.toThrow("raven_mcp")
     await hooks.event!({ event: { type: "test.ready" } } as any)
     const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
     expect(saved.raven_seek.model).toBe("opencode/replacement-free")
@@ -246,7 +254,13 @@ describe("Raven configuration migration", () => {
     expect(config.agent["raven-mcp"].model).toBe("provider/mcp")
     expect(config.agent["raven-mcp"].options.reasoning_effort).toBe("high")
     expect(config.agent.raven.permission.raven_mcp_bridge).toBe("deny")
-    expect(config.agent["raven-mcp"].permission["*"]).toBe("deny")
+    expect(config.agent["raven-mcp"].permission["*"]).toBeUndefined()
+    for (const action of ["read", "glob", "grep", "list", "bash", "external_directory"]) {
+      expect(config.agent["raven-mcp"].permission[action]).toBe(config.agent.raven.permission[action])
+    }
+    for (const action of ["edit", "task", "raven_seek", "raven_mcp"]) {
+      expect(config.agent["raven-mcp"].permission[action]).toBe("deny")
+    }
     expect(config.agent["raven-mcp"].permission.raven_mcp_bridge).toBe("allow")
     await hooks.dispose?.()
   })
@@ -851,7 +865,10 @@ describe("OpenCode 2 integration", () => {
       expect(f.agents.raven.model).toEqual({ providerID: "provider", id: "search" })
       expect(f.agents.raven.permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
       expect(f.agents.raven.permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "*", resource: "*", effect: "deny" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "read", resource: "*", effect: "allow" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
       expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "raven_mcp_bridge", resource: "*", effect: "allow" })
       expect(Object.keys(f.tools)).toEqual(["raven_seek", "raven_mcp", "raven_mcp_bridge"])
       expect(f.tools.raven_seek.input.required).toEqual(["query"])
@@ -903,9 +920,13 @@ describe("OpenCode 2 integration", () => {
     try {
       await expect(before("shell", { command: "rg query ." })).rejects.toThrow("raven_seek")
       await before("shell", { command: "git status | rg modified" })
-      await expect(before("globalDocs_search", { query: "docs" })).rejects.toThrow("raven_seek")
+      for (const tool of ["websearch", "webfetch", "fetch", "globalDocs_search"]) {
+        await expect(before(tool, { query: "online evidence" })).rejects.toThrow(`raven_mcp(query="${tool}: online evidence")`)
+        await before(tool, { query: "direct online evidence" }, "raven-mcp")
+      }
       await before("grep", { pattern: "direct" }, "raven")
       await expect(before("raven_seek", { query: "recursive" }, "raven")).rejects.toThrow("cannot be called")
+      await expect(before("raven_mcp", { query: "recursive" }, "raven-mcp")).rejects.toThrow("cannot be called")
       await expect(before("raven_mcp_bridge", {})).rejects.toThrow("only available inside")
       await before("raven_mcp_bridge", {}, "raven-mcp")
     } finally { await f.cleanup() }
@@ -923,6 +944,7 @@ describe("OpenCode 2 integration", () => {
       const event = { sessionID: "ses_parent", agent: "build", system: [] as any[] }
       await f.hooks["session.context"](event)
       expect(event.system[0].text).toContain("Raven performs search and information retrieval only")
+      expect(event.system[0].text).toContain("retry through `raven_mcp`, not `raven_seek`")
       const ravenEvent = { sessionID: "ses_raven", agent: "raven", system: [] as any[] }
       await f.hooks["session.context"](ravenEvent)
       expect(ravenEvent.system).toEqual([])
@@ -933,7 +955,7 @@ describe("OpenCode 2 integration", () => {
     const f = await setupV2()
     try {
       f.ctx.mcp.transform.mock.calls[0][0]({ list: () => [["laterDocs", { type: "remote", url: "https://example.com/mcp" }]] })
-      await expect(f.hooks["tool.execute.before"]({ tool: "laterDocs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_seek")
+      await expect(f.hooks["tool.execute.before"]({ tool: "laterDocs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_mcp")
     } finally { await f.cleanup() }
   })
 
@@ -966,6 +988,58 @@ describe("OpenCode 2 integration", () => {
         await f.hooks["permission.evaluate"](event)
         expect(event.effect).toBe("ask")
       }
+    } finally { await f.cleanup() }
+  })
+
+  test("approves web and configured global MCP execution only in Raven agents without changing their policies", async () => {
+    const f = await setupV2()
+    const permissions = Object.fromEntries(["raven", "raven-mcp"].map((agent) => [agent, [...f.agents[agent].permissions]]))
+    try {
+      for (const agent of ["raven", "raven-mcp"]) {
+        expect(permissions[agent]).not.toContainEqual({ action: "*", resource: "*", effect: "allow" })
+        for (const action of ["webfetch", "websearch", "fetch", "globalDocs_search"]) {
+          const event = { agent, action, effect: "ask" }
+          await f.hooks["permission.evaluate"](event)
+          expect(event.effect).toBe("allow")
+          const denied = { agent, action, effect: "deny" }
+          await f.hooks["permission.evaluate"](denied)
+          expect(denied.effect).toBe("deny")
+        }
+        for (const action of ["execute", "edit", "shell", "read", "unknownMcp_search", "raven_mcp_bridge"]) {
+          const event = { agent, action, effect: "ask" }
+          await f.hooks["permission.evaluate"](event)
+          expect(event.effect).toBe("ask")
+        }
+        expect(f.agents[agent].permissions).toEqual(permissions[agent])
+      }
+      for (const action of ["webfetch", "websearch", "fetch", "globalDocs_search"]) {
+        for (const agent of [undefined, "build"]) {
+          const other = { agent, action, effect: "ask" }
+          await f.hooks["permission.evaluate"](other)
+          expect(other.effect).toBe("ask")
+        }
+      }
+    } finally { await f.cleanup() }
+  })
+
+  test("retrieval approval follows the enabled global MCP catalog and normalizes server names", async () => {
+    const f = await setupV2()
+    try {
+      f.ctx.mcp.transform.mock.calls[0][0]({ list: () => [
+        ["exa.docs", { type: "remote", url: "https://example.com/mcp" }],
+        ["disabledDocs", { type: "remote", url: "https://example.com/mcp", disabled: true }],
+      ] })
+      for (const [action, expected] of [
+        ["exa_docs_search", "allow"], ["globalDocs_search", "ask"],
+        ["disabledDocs_search", "ask"], ["exa_docsOther_search", "ask"],
+      ]) {
+        for (const agent of ["raven", "raven-mcp"]) {
+          const event = { agent, action, effect: "ask" }
+          await f.hooks["permission.evaluate"](event)
+          expect(event.effect).toBe(expected)
+        }
+      }
+      await expect(f.hooks["tool.execute.before"]({ tool: "exa_docs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_mcp")
     } finally { await f.cleanup() }
   })
 

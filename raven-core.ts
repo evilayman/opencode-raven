@@ -762,14 +762,24 @@ export default (async (input: Pick<PluginInput, "client" | "directory"> & { proj
     return config.raven_seek.excludeAgents.some((a) => a.toLowerCase() === lower)
   }
 
+  function isGlobalMcpTool(toolName: string): boolean {
+    const tool = toolName.toLowerCase()
+    return globalMcpServers.some((server) => tool.startsWith(`${server.toLowerCase()}_`)
+      || tool.startsWith(`${server.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()}_`))
+  }
+
+  function routingKind(toolName: string): DelegationKind {
+    return ["websearch", "webfetch", "fetch"].includes(toolName.toLowerCase()) || isGlobalMcpTool(toolName) ? "mcp" : "seek"
+  }
+
   function isRouteConfigured(toolName: string): boolean {
-    if (!modelOperational("seek")) return false
+    if (!modelOperational(routingKind(toolName))) return false
     const tool = toolName.toLowerCase()
     if (NEVER_ROUTE_TOOLS.has(tool)) return false
     const aliases = tool === "bash" || tool === "shell" ? ["bash", "shell"] : [tool]
     if (config.raven_seek.routeTools?.some((name) => aliases.includes(name.toLowerCase()))) return true
     if (config.raven_seek.routeToolKeywords?.some((keyword) => tool.includes(keyword.toLowerCase()))) return true
-    return globalMcpServers.some((server) => tool.startsWith(`${server.toLowerCase()}_`))
+    return isGlobalMcpTool(tool)
   }
 
   function compactArgs(value: any): any {
@@ -799,12 +809,13 @@ export default (async (input: Pick<PluginInput, "client" | "directory"> & { proj
   }
 
   function rerouteMessage(tool: string, args: any): string {
-    if (ravenProviderIssues.seek) {
-      return `Raven search is currently unavailable: ${ravenProviderIssues.seek}
+    const kind = routingKind(tool)
+    if (ravenProviderIssues[kind]) {
+      return `Raven ${kind === "mcp" ? "MCP" : "search"} is currently unavailable: ${ravenProviderIssues[kind]}
 
-${ravenRecoveryInstructions("seek")}`
+${ravenRecoveryInstructions(kind)}`
     }
-    return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_seek(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
+    return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_${kind}(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
   }
 
   function ravenRecoveryInstructions(kind: DelegationKind): string {
@@ -821,7 +832,7 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function routeSummary(): string {
-    if (!modelOperational("seek")) return "Raven routing: inactive until the configured Search model is loaded."
+    if (!modelOperational("seek") && !modelOperational("mcp")) return "Raven routing: inactive until a configured Raven model is loaded."
     const tools = config.raven_seek.routeTools?.length ? config.raven_seek.routeTools.join(", ") : "(none)"
     const mcps = globalMcpServers.length ? `${globalMcpServers.join(", ")} (auto-detected)` : "none detected"
     const keywords = config.raven_seek.routeToolKeywords?.length ? config.raven_seek.routeToolKeywords.join(", ") : "(none)"
@@ -2092,9 +2103,9 @@ Then restart opencode for the model change to take effect. If the task can be co
     // Register raven_seek tool — lets agents with task:false still delegate through Raven
     tool: {
       "raven_seek": tool({
-        description: "Search and evidence retrieval only. Creates or resumes a Raven Search session for routed local search, filesystem discovery, URL fetching, web/docs/GitHub search, globally configured MCP searches, or command-output inspection. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent must perform that work.",
+        description: "Local search and evidence retrieval only. Creates or resumes a lightweight Raven Search session for file search, filesystem discovery, or command-output inspection. Use raven_mcp instead for online research, web search, URL fetching, documentation, public GitHub search, or MCP requests. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent must perform that work.",
         args: {
-          query: tool.schema.string().describe("A narrowly scoped search or evidence-retrieval request. Include original blocked tool args, exact URLs, paths, patterns, or bounded command-output checks. Do not ask Raven to review or audit code."),
+          query: tool.schema.string().describe("A narrowly scoped local search or evidence-retrieval request. Include original blocked tool args, paths, patterns, or bounded command-output checks. Do not ask Raven to review or audit code."),
           sessionId: tool.schema.string().optional().describe("Raven session ID returned by an earlier raven_seek call. Provide it only when this request should continue that session's research context."),
         },
         async execute(args, context) {
@@ -2320,7 +2331,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         },
       }),
       "raven_mcp": tool({
-        description: "On-demand MCP information retrieval only. Creates or resumes a dedicated Raven MCP session that selects and calls MCPs configured under raven_mcp.onDemandMcpServers. Use for matching MCP capabilities, not local search, code review, auditing, implementation, planning, or general task delegation.",
+        description: "Online research and MCP evidence retrieval only. Creates or resumes a Raven MCP session for web search, URL fetching, documentation, public GitHub search, and global or on-demand MCP requests. Has built-in web tools and local retrieval tools plus the internal MCP bridge; an MCP is not required. Use raven_seek for purely local searches. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent retains analysis and judgment.",
         args: {
           query: tool.schema.string().describe("The information to retrieve and, when known, the target MCP server or capability. The calling agent retains analysis and judgment."),
           sessionId: tool.schema.string().optional().describe("Raven MCP session ID returned by an earlier raven_mcp call. Provide it only to continue that MCP retrieval context."),

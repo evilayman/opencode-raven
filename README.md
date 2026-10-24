@@ -18,8 +18,8 @@
       <h2>Why Raven</h2>
       <p>Raven delegates search and on-demand MCP retrieval to separate focused agents, then returns compact evidence to the calling session.</p>
       <ul>
-        <li>Routes OpenCode search tools and globally configured MCPs through <code>raven_seek</code>.</li>
-        <li>Uses a separately configurable model for on-demand MCP retrieval through <code>raven_mcp</code>.</li>
+        <li>Routes local search and filesystem discovery through lightweight <code>raven_seek</code>.</li>
+        <li>Uses a separately configurable model for online research, built-in web tools, and global or on-demand MCPs through <code>raven_mcp</code>.</li>
         <li>Keeps optional on-demand MCP schemas out of the main model's tool list.</li>
         <li>Preconfigures Context7, Exa, and Grep.app endpoints.</li>
         <li>Tracks estimated main-session context avoided by delegation.</li>
@@ -104,7 +104,7 @@ In this run, Raven handled the search-heavy web research in a child session and 
 **Raven works automatically.** Ask OpenCode for what you need as usual. You do not need to mention Raven, run a command, or manually call a delegation tool.
 
 1. Your agent attempts to use a routed search, fetch, shell-discovery, or MCP tool.
-2. Raven blocks the noisy direct call and gives the agent the exact `raven_seek` retry.
+2. Raven blocks the noisy direct call and gives the agent the exact retry: `raven_seek` for local searches, or `raven_mcp` for web search, URL fetching, and global MCP tools.
 3. The selected Raven agent creates a session attached directly to the root session or resumes one for a related follow-up.
 4. Raven performs retrieval work and returns compact evidence to the calling agent, which retains analysis and judgment.
 
@@ -115,7 +115,7 @@ The main model receives Raven's final answer instead of its raw tool output. Eac
 On V2, `raven_seek` and `raven_mcp` **run in the background by default**. The initial response contains a child-session handle, not the findings. The calling agent can continue independent work; Raven delivers compact findings or a failure notice to that same calling session when retrieval finishes, including when the caller is itself a child session.
 
 ```text
-raven_seek(query="Find the current API documentation")
+raven_mcp(query="Find the current API documentation")
 raven_mcp(query="Retrieve library examples", background=true)
 raven_seek(query="Find the definition needed for my next step", background=false)
 ```
@@ -134,17 +134,17 @@ Under the hood, Raven registers two public delegation tools and one internal bri
 
 | Tool | Purpose |
 |------|---------|
-| `raven_seek` | Creates or resumes a Raven Search session for narrowly scoped evidence retrieval. |
-| `raven_mcp` | Creates or resumes a Raven MCP session for configured on-demand MCP capabilities. |
+| `raven_seek` | Creates or resumes a lightweight Raven Search session for local file search, discovery, and command-output inspection. |
+| `raven_mcp` | Creates or resumes a Raven MCP session for online research using built-in web tools, global or on-demand MCPs, and local retrieval tools when needed for context. No MCP is required. |
 | `raven_mcp_bridge` | Internal bridge used only by the Raven MCP agent. |
 
-On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Explicit deny rules still apply. This does not change permission checks for other tools or access restrictions on the internal MCP bridge.
+On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Inside either Raven agent, it also auto-approves `webfetch`, `websearch`, `fetch`, and tools belonging to enabled globally configured MCP servers. Explicit deny rules still apply. These execution-time approvals do not add a blanket agent permission or change the main agent's tool permissions, model request, or access restrictions on the internal MCP bridge.
 
 For a related follow-up, the main agent can reuse the ID returned by the earlier call:
 
 ```text
-raven_seek(query="Research the available options")
-raven_seek(query="Compare the first two in more detail", sessionId="ses_...")
+raven_mcp(query="Research the available options")
+raven_mcp(query="Compare the first two in more detail", sessionId="ses_...")
 ```
 
 Raven accepts a resumed session only when it belongs to the same root session tree and matching Raven agent. Do not pass session IDs between `raven_seek` and `raven_mcp`. Delegated sessions attach directly to the root so they remain visible in the main session's child switcher even when delegation starts inside another child.
@@ -244,6 +244,8 @@ Generated MCP metadata and main-model guidance live beside `raven-config.json`. 
 
 Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands. On OpenCode 2, Raven also recognizes the native `shell` tool; `bash` and `shell` are routing aliases, so existing routing settings continue to work. Exact `excludeTools` entries use the host's actual tool name.
 
+Local search tools route to `raven_seek`; `webfetch`, `fetch`, `websearch`, and recognized global MCP tools route to `raven_mcp`. Each route uses its target agent's configured model and recovery instructions. Raven MCP can use built-in web tools even with no on-demand MCP servers configured.
+
 Global MCPs are automatically routed when their OpenCode tool names use the normal `<server>_<tool>` prefix. Use a keyword for suffix-style names:
 
 ```txt
@@ -285,13 +287,13 @@ When `bash` is routed, Raven intercepts primary discovery commands such as `rg`,
 Raven is optimized for autonomous retrieval:
 
 - Raven Search has read, search, unrestricted shell, external-directory, and globally configured MCP access without normal permission prompts.
-- Raven MCP has only the internal on-demand MCP bridge and cannot use shell, local search, or edit tools.
-- Its `edit` tool is denied, but shell access is not a read-only sandbox and can modify the system.
+- Raven MCP has the same retrieval access as Raven Search, plus the internal on-demand MCP bridge. It can use built-in web tools without an MCP and inspect local files for research context.
+- Both agents deny edit tools and nested delegation, but shell access is not a read-only sandbox and can modify the system.
 - Queries are sent to Raven's configured model provider.
 - Remote MCP requests are sent to their services; local MCP entries launch local commands and inherit environment values.
 - Startup performs an npm update check and probes enabled on-demand MCPs.
 
-Review `Raven.md` and your MCP commands before using Raven in sensitive environments.
+Review `Raven.md`, `RavenMcp.md`, and your MCP commands before using Raven in sensitive environments.
 
 ## Context Estimates
 

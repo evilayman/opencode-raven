@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.3
+
+### Fixed
+- V2 Raven agents auto-approve webfetch, websearch, fetch, and enabled global MCP tools at permission evaluation time, without blanket agent permissions. Main-agent permissions and explicit denials remain unchanged.
+- Blocked web search, URL fetching, and recognized global MCP calls now recommend `raven_mcp`; local search calls still recommend `raven_seek`. Routing availability and provider recovery use the selected agent.
+
+### Changed
+- Raven MCP now has the same retrieval tools as Raven Search, including local file access, shell, and built-in web tools, plus its private on-demand MCP bridge. Edit tools and nested delegation remain denied. V2 web/global MCP execution approvals apply to both Raven agents.
+- Delegation instructions distinguish lightweight local retrieval through `raven_seek` from online research through `raven_mcp`, even when no MCP is configured.
+
 ## 2.3.2
 
 ### Added
