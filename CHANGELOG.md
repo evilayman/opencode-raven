@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.4
+
+### Fixed
+- Raven Search and MCP follow-ups now validate against the calling session's project instead of the plugin's loading project, avoiding incorrect ownership rejections in OpenCode 2 while preserving parent-session and agent checks.
+
 ## 2.3.3
 
 ### Fixed

@@ -1756,17 +1756,20 @@ Then restart opencode for the model change to take effect. If the task can be co
     return kind === "mcp" ? "Raven MCP" : "Raven Seek"
   }
 
-  async function rootSessionId(sessionId: string, signal?: AbortSignal): Promise<string> {
+  async function rootSessionScope(sessionId: string, signal?: AbortSignal): Promise<{ rootId: string; projectID: string }> {
     let current = sessionId
+    let projectID = input.project.id
     const seen = new Set<string>()
     while (!seen.has(current)) {
       seen.add(current)
       const response = await client.session.get({ path: { id: current }, signal })
       const session = (response as any)?.data ?? response
-      if (!session?.parentID) return current
+      // V2's plugin loading project can differ from the calling session's project.
+      if (current === sessionId) projectID = session?.projectID ?? projectID
+      if (!session?.parentID) return { rootId: current, projectID }
       current = session.parentID
     }
-    return sessionId
+    return { rootId: sessionId, projectID }
   }
 
   async function syncCreatedSession(sessionId: string, title: string, signal?: AbortSignal) {
@@ -1803,9 +1806,9 @@ Then restart opencode for the model change to take effect. If the task can be co
         return { title, output: "Cannot resume Raven: sessionId must not be empty." }
       }
 
-      let rootId = context.sessionID
+      let scope = { rootId: context.sessionID, projectID: input.project.id }
       try {
-        rootId = await rootSessionId(context.sessionID, context.abort)
+        scope = await rootSessionScope(context.sessionID, context.abort)
       } catch (error) {
         if (context.abort.aborted) throw error
         // Falling back preserves delegation if an older OpenCode build cannot read the caller session.
@@ -1826,8 +1829,8 @@ Then restart opencode for the model change to take effect. If the task can be co
         if (!existingSession?.id || existingSession.id !== requestedSessionId) {
           return { title, output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
         }
-        const validParent = existingSession.parentID === rootId || existingSession.parentID === context.sessionID
-        if (!validParent || existingSession.projectID !== input.project.id) {
+        const validParent = existingSession.parentID === scope.rootId || existingSession.parentID === context.sessionID
+        if (!validParent || existingSession.projectID !== scope.projectID) {
           return { title, output: "Cannot resume Raven: sessionId is not part of this main session's Raven tree." }
         }
 
@@ -1859,7 +1862,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         const sessionTitle = `${toolName}: ${args.query.slice(0, 80)}`
         const session = await client.session.create({
           body: {
-            parentID: rootId,
+            parentID: scope.rootId,
             title: sessionTitle,
             ...(host === "v2" ? { agent } : {}),
           },
@@ -2124,9 +2127,9 @@ Then restart opencode for the model change to take effect. If the task can be co
               return { title: "Raven Seek", output: "Cannot resume Raven: sessionId must not be empty." }
             }
 
-            let rootId = context.sessionID
+            let scope = { rootId: context.sessionID, projectID: input.project.id }
             try {
-              rootId = await rootSessionId(context.sessionID, context.abort)
+              scope = await rootSessionScope(context.sessionID, context.abort)
             } catch (error) {
               if (context.abort.aborted) throw error
             }
@@ -2145,7 +2148,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               if (!existingSession?.id || existingSession.id !== requestedSessionId) {
                 return { title: "Raven Seek", output: `Cannot resume Raven session ${requestedSessionId}: the session was not found or could not be read.` }
               }
-              if ((existingSession.parentID !== rootId && existingSession.parentID !== context.sessionID) || existingSession.projectID !== input.project.id) {
+              if ((existingSession.parentID !== scope.rootId && existingSession.parentID !== context.sessionID) || existingSession.projectID !== scope.projectID) {
                 return { title: "Raven Seek", output: "Cannot resume Raven: sessionId is not a Raven child of this main session." }
               }
 
@@ -2177,7 +2180,7 @@ Then restart opencode for the model change to take effect. If the task can be co
               const sessionTitle = `raven_seek: ${args.query.slice(0, 80)}`
               const session = await client.session.create({
                 body: {
-                    parentID: rootId,
+                    parentID: scope.rootId,
                     title: sessionTitle,
                     ...(host === "v2" ? { agent: "raven" } : {}),
                 },
