@@ -34,7 +34,17 @@
 
 ### OpenCode V2
 
-Use the v2 `plugins` key in `opencode.jsonc`:
+In OpenCode's **Install plugin** feature, enter `opencode-raven`.
+
+Or install globally from the CLI:
+
+```sh
+opencode plugin add opencode-raven
+```
+
+Either way, OpenCode manages the plugin configuration and automatically loads Raven's terminal companion—no separate terminal plugin install is needed.
+
+For manual configuration, use the v2 `plugins` key in `opencode.jsonc` instead:
 
 ```jsonc
 {
