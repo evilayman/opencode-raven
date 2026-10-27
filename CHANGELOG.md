@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.6
+
+### Fixed
+- Raven MCP's prompt, tool description, and capability guidance now require suitable MCP retrieval before built-in web tools, even when the caller does not name a server or provides an exact URL.
+- Clarified capability selection: Context7 for supported library/API documentation, Exa for web research and page fetching (including documentation outside Context7 coverage), and Grep.app for public code examples. Suitable caller-named MCPs take priority.
+- Built-in web retrieval is now instructed to be fallback-only when no suitable MCP is available, retrieval fails, or evidence is insufficient, with the reason included in results. This is an agent instruction, not a runtime tool lock.
+
 ## 2.3.5
 
 ### Changed

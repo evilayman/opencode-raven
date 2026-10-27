@@ -969,9 +969,9 @@ Then restart opencode for the model change to take effect. If the task can be co
       return `- ${name}: ${summary} Tools: ${tools}`
     })
     if (target === "raven") {
-      return `Use raven_mcp_bridge for these on-demand MCP capabilities:\n${lines.join("\n")}`
+      return `MCP-first retrieval: Use raven_mcp_bridge to attempt a suitable capability below before built-in web tools. Honor a suitable caller-named MCP; otherwise use Context7 for supported library/API docs, Exa for web research and page fetching (including docs outside Context7 coverage), and Grep.app for public code examples. Built-in web tools are fallback-only when no suitable MCP is available or MCP evidence is unavailable or insufficient; report the fallback reason.\n${lines.join("\n")}`
     }
-    return `Non-Raven agents can use these on-demand MCP capabilities through the public raven_mcp delegator. Use raven_mcp for matching requests and include the target MCP server and likely capability when obvious. The raven-mcp agent itself must call raven_mcp_bridge directly instead:\n${lines.join("\n")}`
+    return `Non-Raven agents use these on-demand MCP capabilities through the public raven_mcp delegator. Include the target MCP server and likely capability when obvious; suitable MCPs must be attempted before built-in web fallbacks. The raven-mcp agent itself must call raven_mcp_bridge directly instead:\n${lines.join("\n")}`
   }
 
   function resolveEnvPlaceholders(value: string): string {
@@ -2334,7 +2334,7 @@ Then restart opencode for the model change to take effect. If the task can be co
         },
       }),
       "raven_mcp": tool({
-        description: "Online research and MCP evidence retrieval only. Creates or resumes a Raven MCP session for web search, URL fetching, documentation, public GitHub search, and global or on-demand MCP requests. Has built-in web tools and local retrieval tools plus the internal MCP bridge; an MCP is not required. Use raven_seek for purely local searches. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent retains analysis and judgment.",
+        description: "Online research and MCP evidence retrieval only. Creates or resumes an MCP-first Raven session for web search, URL fetching, documentation, public GitHub search, and global or on-demand MCP requests. Attempts suitable available MCPs first: Context7 for supported library/API docs, Exa for web research and page fetching, Grep.app for public code examples; honors suitable caller-named MCPs. Built-in web tools are fallback-only when no suitable MCP is available or MCP retrieval fails or returns insufficient evidence, with the reason reported. Local retrieval tools remain available for context. Use raven_seek for purely local searches. Do not delegate code review, auditing, correctness judgments, implementation, debugging decisions, planning, or general task execution; the calling agent retains analysis and judgment.",
         args: {
           query: tool.schema.string().describe("The information to retrieve and, when known, the target MCP server or capability. The calling agent retains analysis and judgment."),
           sessionId: tool.schema.string().optional().describe("Raven MCP session ID returned by an earlier raven_mcp call. Provide it only to continue that MCP retrieval context."),

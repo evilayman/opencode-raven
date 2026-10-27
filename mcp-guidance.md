@@ -4,7 +4,7 @@ Raven performs search and information retrieval only. The calling agent must ret
 
 Non-Raven agents use `raven_seek` for narrowly scoped local evidence retrieval: file search, filesystem discovery, and command-output inspection. Use it when a local search tool or search-like shell command is blocked. Include the original tool intent and relevant arguments. Do not delegate an entire review or general task.
 
-Non-Raven agents use `raven_mcp` for online research: web search, URL fetching, library documentation, public GitHub search, and global or on-demand MCP requests. When `websearch`, `webfetch`, `fetch`, or a global MCP tool is blocked, retry through `raven_mcp`, not `raven_seek`. Include the target server or capability when obvious. Raven MCP can use built-in web tools and local retrieval tools as well as MCPs; an MCP is not required. Only the `raven-mcp` agent calls `raven_mcp_bridge`; it must use the bridge directly instead of either public delegation tool.
+Non-Raven agents use `raven_mcp` for online research: web search, URL fetching, library documentation, public GitHub search, and global or on-demand MCP requests. When `websearch`, `webfetch`, `fetch`, or a global MCP tool is blocked, retry through `raven_mcp`, not `raven_seek`. Include the target server or capability when obvious. Raven MCP must attempt suitable available MCP capabilities first, even when the caller does not name a server: Context7 for supported library/API documentation, Exa for web research, official-site discovery and page fetching (including documentation outside Context7 coverage), and Grep.app for public code examples. Caller-named suitable MCPs take priority. Built-in web tools are fallback-only when no suitable MCP is available or MCP retrieval fails or provides insufficient evidence; Raven must report the reason. Local retrieval tools remain available for context and saved output. Only the `raven-mcp` agent calls `raven_mcp_bridge`; it must use the bridge directly instead of either public delegation tool.
 
 When a request follows up on an earlier Raven result, pass the session ID returned by the matching tool. Omit `sessionId` for unrelated work and never pass a `raven_seek` session to `raven_mcp` or vice versa.
 
@@ -30,7 +30,7 @@ Examples:
 
 `raven_seek(query="Find every caller of validateToken and return file/line locations")`
 
-`raven_mcp(query="Fetch/read https://example.com and extract the documented install flags")`
+`raven_mcp(query="Use Exa to fetch/read https://example.com and extract the documented install flags")`
 
 `raven_mcp(query="Use Context7 to retrieve the current API documentation for Effect Schema decoding")`
 
