@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.7
+
+### Fixed
+- Blocked shell calls now identify the specific search fragments, preserving quoted arguments and reporting multiple searches even late in long commands.
+- Concise routing messages confirm the call was blocked before execution and direct only the lookups to `raven_seek`, while keeping remaining execution with the calling agent in dependency order.
+
 ## 2.3.6
 
 ### Fixed

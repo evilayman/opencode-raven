@@ -265,6 +265,8 @@ Route or unroute exact tools:
 
 When `bash` is routed, Raven intercepts primary discovery commands such as `rg`, recursive `grep`, `find -name`, `dir /s`, and `Get-ChildItem -Recurse`, including common quoted shell wrappers. Bounded output filters such as `command | grep ...` remain direct.
 
+For blocked shell calls, the error identifies the matching search command and its original command fragment, even when it occurs late in a longer job. The whole tool call is blocked before execution; Raven does not automatically split or run any part of it. Delegate only the lookup to `raven_seek`, with its working directory and desired facts. Keep image generation, builds, and other non-retrieval work in the main agent's shell tool, preserving ordering, variable state, and exit-code dependencies when splitting mixed commands.
+
 ## Commands
 
 | Command | Action |

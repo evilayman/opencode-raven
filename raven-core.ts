@@ -77,21 +77,27 @@ const MAX_TIMEOUT_SECONDS = Math.floor(MAX_TIMER_MS / 1000)
 const SEARCH_BASH_RE = /\b(?:rg|ripgrep|grep|egrep|fgrep|git\s+grep|ack|ag\b|findstr|Select-String)\b|\b(?:Get-ChildItem|gci)\b(?=[^|;&\n]*(?:-Recurse|-Filter|-Include|\s-[A-Za-z]*r[A-Za-z]*\b))|\bdir\b(?=[^|;&\n]*(?:[/-][sS]\b|-Recurse|-Filter|-Include))|\bls\b(?=[^|;&\n]*(?:\s-[A-Za-z]*R[A-Za-z]*\b|--recursive\b))|\bfind\b\s+.*(?:-name|-type)\b/i
 
 // Strip quoted content to avoid false positives (e.g. echo "use grep here")
-function stripHeredocs(cmd: string): string {
-  return cmd.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?\n\s*\1/g, "")
+function stripHeredocs(cmd: string, preserveOffsets = false): string {
+  return cmd.replace(/<<-?\s*["']?(\w+)["']?[\s\S]*?\n\s*\1/g,
+    (value) => preserveOffsets ? value.replace(/[^\r\n]/g, " ") : "")
 }
 
-function stripShellComments(cmd: string): string {
+function stripShellComments(cmd: string, preserveOffsets = false): string {
   return cmd
     .split("\n")
-    .map((line) => line.replace(/(^|\s)#.*$/, "$1").trimEnd())
+    .map((line) => preserveOffsets
+      ? line.replace(/(^|\s)#.*$/, (value, prefix) => prefix + " ".repeat(value.length - prefix.length))
+      : line.replace(/(^|\s)#.*$/, "$1").trimEnd())
     .join("\n")
 }
 
 function stripQuotedContent(cmd: string): string {
-  return stripShellComments(stripHeredocs(cmd)
-    .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""'))
+  // Keep source offsets so a routing error can quote only the triggering fragment,
+  // with its original paths/arguments, rather than the entire shell job.
+  const mask = (value: string) => value[0] + value.slice(1, -1).replace(/[^\r\n]/g, " ") + value.at(-1)
+  return stripShellComments(stripHeredocs(cmd, true)
+    .replace(/'[^']*'/g, mask)
+    .replace(/"[^"]*"/g, mask), true)
 }
 
 function unquoteShellPayload(value: string): string {
@@ -154,33 +160,56 @@ function isOutputFilterSegment(segment: string): boolean {
   return /^\s*(?:grep|ripgrep|rg|egrep|fgrep|findstr|Select-String|head|tail)\b/i.test(segment)
 }
 
-function hasSearchAfterCommandSeparator(segment: string): boolean {
-  const separator = segment.search(/;|&&|\|\|/)
-  return separator !== -1 && SEARCH_BASH_RE.test(segment.slice(separator))
+interface ShellSearchMatch {
+  trigger: string
+  fragment: string
 }
 
-function commandLooksLikeSearch(cmd: string): boolean {
+function commandSearchMatches(cmd: string): ShellSearchMatch[] {
   const wrapped = wrappedShellPayload(cmd)
-  if (wrapped !== undefined) return commandLooksLikeSearch(wrapped)
+  if (wrapped !== undefined) return commandSearchMatches(wrapped)
 
   const stripped = stripQuotedContent(cmd)
   const lower = stripped.toLowerCase().trim()
-  if (/^cmd\s+\/c\s+"?(?:findstr|find|tree)\b/.test(lower)) return true
-  if (/^cmd\s+\/c\s+"?dir\b[^\n]*\s\/s\b/.test(lower)) return true
+  const legacyCmdSearch = /^cmd\s+\/c\s+"?(findstr|find|tree)\b/.exec(lower)
+    ?? /^cmd\s+\/c\s+"?(dir)\b[^\n]*\s\/s\b/.exec(lower)
+  const matches: ShellSearchMatch[] = []
+  const addMatch = (start: number, trigger: string) => {
+    // Stop at shell/pipeline/group boundaries outside quoted content. A fragment
+    // is diagnostic context, not an executable rewrite of an arbitrary shell AST.
+    const rest = stripped.slice(start + trigger.length)
+    const boundary = rest.search(/;|&&|\|\||\||(?<![<>])&(?![<>])|[\r\n)}]/)
+    const end = boundary === -1 ? cmd.length : start + trigger.length + boundary
+    matches.push({ trigger, fragment: cmd.slice(start, end).trim() })
+    return end
+  }
+  if (legacyCmdSearch) {
+    const start = stripped.toLowerCase().indexOf(legacyCmdSearch[1], stripped.toLowerCase().indexOf("/c") + 2)
+    addMatch(start, legacyCmdSearch[1])
+    return matches
+  }
 
-  return splitPipelineSegments(stripped).some((segment, index) => {
+  let offset = 0
+  splitPipelineSegments(stripped).forEach((segment, index) => {
     // Allow bounded filters over output already produced by the previous command:
     //   pacman -Qi libarchive | head -15
     //   7z i | grep -i udf
     // These are not Raven-worthy filesystem/web/doc searches.
-    if (index > 0 && isOutputFilterSegment(segment)) return hasSearchAfterCommandSeparator(segment)
-    return SEARCH_BASH_RE.test(segment)
+    const searchFrom = index > 0 && isOutputFilterSegment(segment) ? segment.search(/;|&&|\|\|/) : 0
+    if (searchFrom !== -1) {
+      const pattern = new RegExp(SEARCH_BASH_RE.source, "gi")
+      pattern.lastIndex = searchFrom
+      let match: RegExpExecArray | null
+      while ((match = pattern.exec(segment))) {
+        // The find rule consumes arguments to check -name/-type; report the
+        // command token separately so it cannot swallow intervening jobs.
+        const trigger = /^(?:git\s+grep|[\w-]+)/i.exec(match[0])![0]
+        pattern.lastIndex = addMatch(offset + match.index, trigger) - offset
+      }
+    }
+    offset += segment.length + 1
   })
-}
-
-function isSearchBash(tool: string, args: any): boolean {
-  if (tool !== "bash" && tool !== "shell") return false
-  return commandLooksLikeSearch(String(args?.command ?? ""))
+  return matches
 }
 
 // ── Config file shape ──
@@ -808,13 +837,22 @@ export default (async (input: Pick<PluginInput, "client" | "directory"> & { proj
     return query.length > 300 ? `${query.slice(0, 297)}...` : query
   }
 
-  function rerouteMessage(tool: string, args: any): string {
+  function rerouteMessage(tool: string, args: any, shellSearches: ShellSearchMatch[] = []): string {
     const kind = routingKind(tool)
+    const shellDetails = shellSearches.length
+      ? `Raven blocked '${tool}' before execution.
+
+Search fragments:
+${shellSearches.map(({ fragment }) => `- ${JSON.stringify(fragment)}`).join("\n")}
+
+Delegate these lookups to raven_seek with the working directory and desired facts. Run remaining steps with '${tool}', preserving order and dependencies.`
+      : ""
     if (ravenProviderIssues[kind]) {
-      return `Raven ${kind === "mcp" ? "MCP" : "search"} is currently unavailable: ${ravenProviderIssues[kind]}
+      return `${shellDetails ? `${shellDetails}\n\n` : ""}Raven ${kind === "mcp" ? "MCP" : "search"} is currently unavailable: ${ravenProviderIssues[kind]}
 
 ${ravenRecoveryInstructions(kind)}`
     }
+    if (shellDetails) return shellDetails
     return `The '${tool}' tool call is blocked by Raven. Your next tool call should be raven_${kind}(query="${attemptedQuery(tool, args).replace(/"/g, "'")}").`
   }
 
@@ -2688,12 +2726,13 @@ Then restart opencode for the model change to take effect. If the task can be co
 
       // ── Block routed tools/MCPs for non-Raven agents ──
       const shouldRouteTool = input.tool === "bash" || input.tool === "shell" ? false : isRouteConfigured(input.tool)
-      const isSearchBashCmd = isRouteConfigured(input.tool) && isSearchBash(input.tool, output.args || input.args)
+      const shellSearches = (input.tool === "bash" || input.tool === "shell") && isRouteConfigured(input.tool)
+        ? commandSearchMatches(String((output.args || input.args)?.command ?? "")) : []
 
-      if (shouldRouteTool || isSearchBashCmd) {
+      if (shouldRouteTool || shellSearches.length) {
         const args = compactArgs(output.args || input.args)
         if (output.args && typeof output.args === "object") output.args = args
-        throw new Error(rerouteMessage(input.tool, args))
+        throw new Error(rerouteMessage(input.tool, args, shellSearches))
       }
     },
 
