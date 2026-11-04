@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.8
+
+### Added
+- Interactive V2 `/raven mcp` and `/raven-mcps` popups using native searchable dialogs, with connection/authentication status, browser sign-in, refresh, enable/disable, details, and confirmed sign-out.
+- Native OAuth for Raven's on-demand remote MCPs, including PKCE browser sign-in, loopback callback state validation, saved credentials, and SDK token refresh without globally exposing MCP tools.
+- `/raven mcp auth <server>` and `/raven mcp logout <server>`, optional client/scope/callback settings, and authentication guidance that never launches interactive flows during startup or agent calls.
+
 ## 2.3.7
 
 ### Fixed

@@ -1,10 +1,33 @@
 import type { Rpc } from "@opencode/plugin"
 import { z } from "zod"
 
+export const RavenMcpServerSchema = z.object({
+  name: z.string(),
+  type: z.enum(["remote", "local"]),
+  enabled: z.boolean(),
+  status: z.enum(["disabled", "pending", "ready", "connected", "failed", "auth_required", "authorizing"]),
+  description: z.string(),
+  toolCount: z.number(),
+  oauth: z.boolean(),
+  authenticated: z.boolean(),
+  lastError: z.string().optional(),
+})
+export type RavenMcpServer = z.infer<typeof RavenMcpServerSchema>
+export const RavenMcpActionSchema = z.enum(["auth", "logout", "enable", "disable"])
+export type RavenMcpAction = z.infer<typeof RavenMcpActionSchema>
+
 // Portable contract shared by the v2 server, terminal companion, and clients.
 export const RavenRpc = {
   id: "opencode-raven",
   methods: {
+    listMcps: {
+      input: z.object({}),
+      output: z.object({ servers: z.array(RavenMcpServerSchema) }),
+    },
+    mcpAction: {
+      input: z.object({ serverName: z.string(), action: RavenMcpActionSchema }),
+      output: z.object({ text: z.string(), authorizationUrl: z.string().optional() }),
+    },
     refreshMcps: {
       input: z.object({ serverName: z.string().optional() }),
       output: z.object({ refreshed: z.array(z.string()), failed: z.array(z.string()) }),
@@ -17,7 +40,7 @@ export const RavenRpc = {
   events: {
     notice: {
       schema: z.object({
-        kind: z.enum(["command", "toast"]),
+        kind: z.enum(["command", "toast", "mcp"]),
         message: z.string(),
         title: z.string().optional(),
         sessionID: z.string().optional(),

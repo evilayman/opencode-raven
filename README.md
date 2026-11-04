@@ -240,6 +240,96 @@ Per-server `timeout` values are milliseconds. Local servers inherit the OpenCode
 
 Generated MCP metadata and main-model guidance live beside `raven-config.json`. Refresh them with `/raven mcp refresh [server]`.
 
+### Interactive MCP manager (OpenCode V2)
+
+Run `/raven mcp` or `/raven-mcps` to open Raven's searchable MCP popup. Click a
+server, or select it with the arrow keys and Enter, to see its actions:
+
+- Sign in through the browser, continue a pending sign-in, or sign out.
+- Refresh the server's connection and discovered tools.
+- Enable or disable it immediately, saving the setting in Raven's configuration.
+- View server details and the last connection error.
+
+The list includes disabled servers and shows connection/authentication status and
+discovered tool counts. **Ready · on demand** means discovery succeeded; it does
+not claim a permanent connection. **Connected** means Raven currently holds an
+open connection. Choose **Refresh all servers** to recheck enabled servers.
+Disabling closes cached connections and cancels pending sign-in without deleting
+saved credentials. Signing out asks for confirmation before clearing credentials.
+
+The sign-in action opens the browser on the TUI's machine and also displays the
+sign-in URL as a fallback. On a remote setup, the browser still needs access to the
+server's loopback callback. Escape closes the manager; an explicit **Back** action
+returns from a server's action menu to the server list.
+
+This menu manages Raven's on-demand servers only. OpenCode's native `/mcps` menu
+and globally registered servers are unchanged. OpenCode V1 keeps the text-based
+`/raven mcp` status command.
+
+### OAuth sign-in
+
+Remote on-demand MCPs support OAuth directly through Raven; they do not need to
+be registered as global OpenCode MCPs. For example, merge Basecamp into the existing
+`raven_mcp.onDemandMcpServers` configuration:
+
+```jsonc
+{
+  "basecamp": {
+    "enabled": true,
+    "type": "remote",
+    "url": "https://mcp.basecamp.com/mcp",
+    "description": "Basecamp projects, to-dos, messages, and schedules."
+  }
+}
+```
+
+After loading the updated Raven configuration, run `/raven mcp auth basecamp`.
+Open the displayed URL in a browser and approve access. Raven waits up to five
+minutes for the loopback callback, exchanges the authorization code using PKCE,
+then refreshes tool discovery and shows a completion notification. Startup probes
+and agent calls never initiate an interactive sign-in; authentication failures
+show the sign-in command instead. An expired access token is refreshed by the MCP
+SDK when the server rejects it, if a valid refresh token is available.
+
+OAuth is enabled by default for remote servers without an explicit `Authorization`
+header. Set `"oauth": false` to disable it. Servers without dynamic registration
+can use pre-registered client settings:
+
+```jsonc
+{
+  "type": "remote",
+  "url": "https://example.com/mcp",
+  "oauth": {
+    "clientId": "{env:MY_MCP_CLIENT_ID}",
+    "clientSecret": "{env:MY_MCP_CLIENT_SECRET}",
+    "scope": "read",
+    "callbackPort": 19847
+  }
+}
+```
+
+All settings are optional. Public clients should omit `clientSecret`.
+`clientMetadataUrl` is also supported for servers accepting URL-based client IDs.
+For a pre-registered client, register `http://127.0.0.1:19847/oauth/callback` (or
+your configured port). Otherwise Raven picks a free port on first sign-in and
+reuses that port for subsequent sign-ins. The callback listener binds only to
+`127.0.0.1`, validates a random state value, and closes on completion, cancellation,
+timeout, or plugin unload. OAuth endpoints must use HTTPS, except loopback servers.
+When OpenCode runs remotely, the browser must be able to reach its loopback
+callback, for example through port forwarding.
+
+Credentials are stored separately under `~/.config/opencode/opencode-raven/oauth/`,
+with per-endpoint/client isolation and atomic writes. Files use owner-only Unix
+permissions; on Windows they inherit the user's directory ACLs. They contain
+unencrypted tokens and must be treated as secrets; they are not written to Raven's
+configuration, generated guidance, or RPC output. Do not commit or share them.
+Raven's OAuth sign-in is separate from OpenCode's native `/mcps` sign-in.
+
+Use `/raven mcp logout basecamp` to cancel a pending sign-in, clear the saved
+credentials, and close Raven's cached connections. Logout does not revoke the
+provider's grant; revoke it in the provider's account settings if needed. Avoid
+configuring the same server globally and on-demand, which exposes duplicate tools.
+
 ## Routing
 
 Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands. On OpenCode 2, Raven also recognizes the native `shell` tool; `bash` and `shell` are routing aliases, so existing routing settings continue to work. Exact `excludeTools` entries use the host's actual tool name.
@@ -274,7 +364,10 @@ For blocked shell calls, the error identifies the matching search command and it
 | `/raven` | Show status, routing, MCP health, version, model, timeout, and stats. |
 | `/raven help` | Show command help. |
 | `/raven route` | Show and edit routed tools and keywords. |
-| `/raven mcp` | Show on-demand MCP health and generated metadata. |
+| `/raven mcp` | Open the interactive MCP manager on V2; show text status on V1. |
+| `/raven-mcps` | Open the interactive MCP manager on V2 (also available in the command palette). |
+| `/raven mcp auth <server>` | Display a browser sign-in URL for a remote on-demand MCP. |
+| `/raven mcp logout <server>` | Cancel sign-in, clear saved OAuth credentials, and close cached connections. |
 | `/raven mcp refresh [server]` | Recheck MCP health and regenerate metadata. |
 | `/raven mcp detail full|minimized` | Set generated guidance detail; restart afterward. |
 | `/raven seek model <provider/model>\|auto` | Change or auto-detect the search model; restart afterward. |
@@ -309,6 +402,7 @@ Review `Raven.md`, `RavenMcp.md`, and your MCP commands before using Raven in se
 - Search provider or quota failure: run `/raven seek model <provider/model>`, then restart OpenCode.
 - MCP-agent provider or quota failure: run `/raven mcp model <provider/model>`, then restart OpenCode.
 - MCP failure: run `/raven mcp`, then `/raven mcp refresh <server>` after correcting its URL, command, environment, or credentials.
+- OAuth required or expired: run `/raven mcp auth <server>` and approve access in the browser. If its callback port is busy, configure a free `oauth.callbackPort`. Use `/raven mcp logout <server>` to clear credentials and cancel an unfinished sign-in.
 - Stale plugin version: run `/raven update`, restart OpenCode, and follow the cache-clearing instructions it prints if needed.
 - Remove Raven: delete `"opencode-raven"` from `plugin`, restart, then optionally remove `~/.config/opencode/opencode-raven/`.
 

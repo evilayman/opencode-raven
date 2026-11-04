@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import { RavenRpc, mcpRefreshArguments, mcpRefreshToast } from "./rpc"
+import { createMcpManager } from "./mcp-ui"
 
 export default {
   id: "opencode-raven.tui",
@@ -58,6 +59,11 @@ export default {
       })
       ctx.ui.dialog.set({ size: "large", centered: true })
     }
+    const mcpManager = createMcpManager(ctx, {
+      list: () => rpc.listMcps({}, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
+      action: (serverName, action) => rpc.mcpAction({ serverName, action }, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
+      refresh: (serverName) => refreshMcps(serverName ? { serverName } : {}),
+    }, refreshController.signal)
     const unsubscribe = rpc.events.on("notice", async (event) => {
       const location = ctx.location ?? ctx.data.location.default()
       if (event.location?.directory !== location.directory) return
@@ -65,7 +71,11 @@ export default {
         const route = ctx.ui.router.current()
         if (route.type !== "session" || route.sessionID !== event.data.sessionID) return
       }
-      if (event.data.kind === "command") {
+      if (event.data.kind === "mcp") {
+        // Keep the event stream free for OAuth/refresh completion notices while
+        // the interactive dialog is awaiting input.
+        void mcpManager.open()
+      } else if (event.data.kind === "command") {
         const route = ctx.ui.router.current()
         if (route.type !== "session" || route.sessionID !== event.data.sessionID) return
         await show(event.data.message)
@@ -89,6 +99,7 @@ export default {
       async run(input = "") {
         try {
           const args = input.replace(/^\s*\/raven(?:\s+|$)/i, "").trim()
+          if (args.toLowerCase() === "mcp") { await mcpManager.open(); return }
           const refresh = mcpRefreshArguments(args)
           if (refresh) { await refreshMcps(refresh); return }
           const result = await rpc.command({ arguments: args }, { location: ctx.location ?? ctx.data.location.default() })
@@ -97,9 +108,13 @@ export default {
           ctx.ui.toast.show({ title: "Raven", message: String(error), variant: "error" })
         }
       },
+    }, {
+      id: "raven-mcps", title: "Raven MCPs", description: "Manage Raven's on-demand MCP servers",
+      palette: true, slash: { name: "raven-mcps" }, run: () => mcpManager.open(),
     }] }))
     return () => {
       refreshController.abort()
+      mcpManager.dispose()
       unsubscribe()
     }
   },

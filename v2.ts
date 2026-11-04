@@ -206,6 +206,8 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       return { text: output.parts.map((part) => part.text).join("\n") }
     }
     const rpc = await ctx.rpc.register(RavenRpc, {
+      listMcps: async () => raven.listMcps(),
+      mcpAction: async ({ serverName, action }) => raven.mcpAction(serverName, action),
       command: async ({ arguments: raw }) => executeCommand(raw),
       refreshMcps: async ({ serverName }) => raven.refreshMcps(serverName),
     })
@@ -312,6 +314,10 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       editor.add({
         name: "raven", description: "Manage Raven routing, MCPs, models, timeouts, updates, and status",
         async execute({ sessionID, prompt }) {
+          if (prompt.text.trim().toLowerCase() === "mcp") {
+            await emitNotice({ kind: "mcp", sessionID, message: "Raven MCPs" })
+            return
+          }
           const refresh = mcpRefreshArguments(prompt.text)
           if (refresh) {
             await emitNotice({ kind: "toast", sessionID, title: "Raven MCP", message: `Refreshing ${refresh.serverName ?? "on-demand MCPs"}…`, variant: "info" })
@@ -326,6 +332,10 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
           const { text } = await executeCommand(prompt.text)
           await emitNotice({ kind: "command", sessionID, message: text, title: "Raven" })
         },
+      })
+      editor.add({
+        name: "raven-mcps", description: "Open Raven's on-demand MCP manager",
+        async execute({ sessionID }) { await emitNotice({ kind: "mcp", sessionID, message: "Raven MCPs" }) },
       })
     }))
 
