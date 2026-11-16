@@ -11,8 +11,8 @@ import { homedir, tmpdir } from "node:os"
 import { McpOAuth, McpAuthRequiredError, type McpOAuthOptions } from "./oauth"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js"
-import type { RavenMcpAction, RavenMcpServer } from "./rpc"
-import { cliDefinition, parseCliRegistry, prepareCli, cliExecutor, type CliDefinition } from "./cli"
+import { integrationNeedsAttention, integrationRefreshArguments, integrationRefreshToast, integrationRefreshingToast, integrationRefreshErrorToast, integrationSummary, type RavenIntegration, type RavenMcpAction, type RavenMcpServer } from "./rpc"
+import { cliDefinition, parseCliRegistry, prepareCli, cliExecutor, inspectCli, type CliDefinition } from "./cli"
 
 // ── Resolve paths relative to this package (works in node_modules/) ──
 const PKG_DIR = import.meta.dirname!
@@ -955,20 +955,6 @@ Then restart opencode for the model change to take effect. If the task can be co
     return section.autoSelectedModel === section.model ? `${section.model} (auto)` : section.model
   }
 
-  function mcpSummary(): string {
-    const buckets = onDemandMcpStatusBuckets()
-    const total = buckets.loaded.length + buckets.failed.length + buckets.pending.length
-    if (!total) return `Raven on-demand MCPs (always behind Raven): none configured.\n  Guidance detail: ${config.raven_act.descriptionDetail ?? "full"}`
-    const lines = [
-      "Raven on-demand MCPs (always behind Raven):",
-      `  Loaded: ${buckets.loaded.length ? buckets.loaded.join(", ") : "none"}`,
-      `  Failed: ${buckets.failed.length ? buckets.failed.join(", ") : "none"}`,
-      `  Pending: ${buckets.pending.length ? buckets.pending.join(", ") : "none"}`,
-      `  Guidance detail: ${config.raven_act.descriptionDetail ?? "full"}`,
-    ]
-    return lines.join("\n")
-  }
-
   function ravenAgentPrompt(): string {
     const extra = config.raven_seek.instructions?.trim()
     const prompt = ravenPrompt
@@ -1496,6 +1482,80 @@ Then restart opencode for the model change to take effect. If the task can be co
     return { text: `${canonicalName} ${enabled ? "enabled" : "disabled"}. Takes effect immediately.${enabled ? " Refresh its tools to check the connection." : " Saved OAuth credentials are kept."}` }
   }
 
+  async function listIntegrations(): Promise<{ integrations: RavenIntegration[] }> {
+    const { servers } = await listMcps()
+    const integrations: RavenIntegration[] = servers.map((server) => ({
+      ...server, id: `mcp:${server.name}`, kind: "mcp", transport: server.type === "local" ? "stdio" : "http",
+    }))
+    for (const [name, definition] of Object.entries(config.raven_act.onDemandClis ?? {})) {
+      const enabled = definition.enabled !== false
+      const check = enabled ? inspectCli(definition, input.directory) : {}
+      integrations.push({
+        id: `cli:${name}`, name, kind: "cli", transport: "cli", enabled,
+        status: !enabled ? "disabled" : check.error ? "failed" : "available",
+        description: definition.description || "Registered command-line tool.",
+        executable: check.executable ?? definition.command[0],
+        cwd: check.cwd ?? definition.cwd ?? input.directory,
+        // OpenCode's RPC transport requires JSON values, even for optional fields.
+        ...(check.error ? { lastError: check.error } : {}),
+      })
+    }
+    if (cliConfigError) integrations.push({
+      id: "cli:configuration", name: "CLI configuration", kind: "cli", transport: "cli",
+      enabled: true, status: "failed", description: "Repair onDemandClis in raven-config.json and run /raven cli reload.",
+      lastError: "Invalid CLI definitions; no CLI can run until the configuration is repaired.",
+    })
+    return { integrations }
+  }
+
+  async function findIntegration(id: string): Promise<RavenIntegration> {
+    const { integrations } = await listIntegrations()
+    const exact = integrations.find((item) => item.id.toLowerCase() === id.toLowerCase())
+    if (exact) return exact
+    const matches = integrations.filter((item) => item.name.toLowerCase() === id.toLowerCase())
+    if (matches.length === 1) return matches[0]
+    if (matches.length > 1) throw new Error(`Ambiguous integration: ${id}. Use mcp:${id} or cli:${id}.`)
+    throw new Error(`Unknown integration: ${id}`)
+  }
+
+  async function integrationAction(id: string, action: RavenMcpAction): Promise<{ text: string; authorizationUrl?: string }> {
+    const integration = await findIntegration(id)
+    if (integration.kind === "mcp") return mcpAction(integration.name, action)
+    if (action !== "enable" && action !== "disable") throw new Error("CLI integrations do not use MCP sign-in.")
+    if (cliConfigError) throw new Error("Repair CLI configuration and run /raven cli reload first.")
+    updateConfig((latest) => {
+      const entries = latest.raven_act.onDemandClis ?? {}
+      if (!entries[integration.name]) throw new Error(`Unknown CLI: ${integration.name}`)
+      return { raven_act: { onDemandClis: { ...entries, [integration.name]: { ...entries[integration.name], enabled: action === "enable" } } } }
+    })
+    saveDynamicGuidance()
+    return { text: `${integration.name} ${action === "enable" ? "enabled" : "disabled"}. Takes effect immediately.` }
+  }
+
+  async function refreshMcps(serverName?: string) {
+    // Client refresh owns its notification; don't also show a startup warning.
+    mcpFailureToastPending = false
+    return !serverName && !mcpStartupRefreshComplete
+      ? scheduleOnDemandMcpRefresh() : queueOnDemandMcpRefresh(true, serverName)
+  }
+
+  const integrationRefreshes = new Map<string, Promise<{ integrations: RavenIntegration[] }>>()
+  function refreshIntegrations(id?: string): Promise<{ integrations: RavenIntegration[] }> {
+    const key = id?.toLowerCase() ?? "*"
+    const pending = integrationRefreshes.get(key)
+    if (pending) return pending
+    const run = (async () => {
+      mcpFailureToastPending = false
+      const target = id ? await findIntegration(id) : undefined
+      if (!target || (target.kind === "mcp" && target.enabled)) await refreshMcps(target?.name)
+      // CLI availability checks only read the filesystem, including for refresh.
+      const result = await listIntegrations()
+      return { integrations: target ? result.integrations.filter((item) => item.id === target.id) : result.integrations }
+    })().finally(() => integrationRefreshes.delete(key))
+    integrationRefreshes.set(key, run)
+    return run
+  }
+
   async function listAllMcpTools(client: Client, options?: { signal?: AbortSignal; timeout?: number }): Promise<any[]> {
     const tools: any[] = []
     let cursor: string | undefined
@@ -1667,12 +1727,6 @@ Then restart opencode for the model change to take effect. If the task can be co
     return buckets
   }
 
-  function failedOnDemandMcpNames(names?: string[]): string[] {
-    const configured = activeOnDemandMcpEntries().map(([name]) => name)
-    const wanted = names?.length ? names : configured
-    return wanted.filter((name) => configured.includes(name) && onDemandMcpRuntimeStatus(name) === "failed")
-  }
-
   function setOnDemandMcpHealth(serverName: string, status: "ready" | "failed", error?: unknown) {
     const match = getOnDemandMcpServer(serverName)
     if (!match) return undefined
@@ -1722,7 +1776,31 @@ Then restart opencode for the model change to take effect. If the task can be co
   }
 
   function helpText(): string {
-    return `Raven commands:\n  /raven help - show this help\n  /raven route - show or edit routed tools/keywords\n  /raven seek model <provider/model>|auto - select the search model (reload OpenCode)\n  /raven seek effort <value> - set search reasoning effort (reload OpenCode)\n  /raven seek timeout <seconds> - set search timeout\n  /raven act - show the unified operator and its MCP/CLI capabilities\n  /raven act model <provider/model>|auto - select the shared operator model (reload OpenCode)\n  /raven act effort <value> - set operator reasoning effort (reload OpenCode)\n  /raven act timeout <seconds> - set the shared MCP/CLI delegation timeout\n  /raven mcp - manage on-demand MCPs\n  /raven mcp auth <server> - sign in to a remote MCP\n  /raven mcp logout <server> - clear OAuth credentials and connections\n  /raven mcp refresh [server] - refresh MCP metadata\n  /raven mcp detail full|minimized - set MCP guidance detail\n  /raven cli - show registered CLIs and registration help\n  /raven cli add <name> <JSON definition> - register an external CLI\n  /raven cli enable|disable|remove <name> - manage a CLI\n  /raven cli reload - reload manually edited CLI definitions\n  /raven update - check for an update\n  /raven stats - show context saved`
+    return [
+      "Raven commands:",
+      "  /raven - compact models, integrations, and context savings",
+      "  /raven-integrations - open the integration manager (V2)",
+      "  /raven integrations - manage MCP and CLI integrations",
+      "  /raven integrations refresh [mcp:name|cli:name] - check integrations",
+      "  /raven route - show or edit routed tools/keywords",
+      "  /raven seek model <provider/model>|auto - select the search model (reload OpenCode)",
+      "  /raven seek effort <value> - set search reasoning effort (reload OpenCode)",
+      "  /raven seek timeout <seconds> - set search timeout",
+      "  /raven act - show operator settings and integrations",
+      "  /raven act model <provider/model>|auto - select the operator model (reload OpenCode)",
+      "  /raven act effort <value> - set operator reasoning effort (reload OpenCode)",
+      "  /raven act timeout <seconds> - set the shared MCP/CLI task timeout",
+      "  /raven mcp auth <server> - sign in to a remote MCP",
+      "  /raven mcp logout <server> - clear OAuth credentials and connections",
+      "  /raven mcp refresh [server] - check MCP connections",
+      "  /raven mcp detail full|minimized - set MCP guidance detail",
+      "  /raven cli - show registered CLIs and registration help",
+      "  /raven cli add <name> <JSON definition> - register an external CLI",
+      "  /raven cli enable|disable|remove <name> - manage a CLI",
+      "  /raven cli reload - reload manually edited CLI definitions",
+      "  /raven update - check for an update",
+      "  /raven stats - show detailed context savings",
+    ].join("\n")
   }
 
   function formatMcpList(title: string, items: any[], fields: string[] = ["name", "description"]): string {
@@ -1916,22 +1994,17 @@ Then restart opencode for the model change to take effect. If the task can be co
 
   async function notifyIfMcpFailures(names?: string[]) {
     try {
-      const failed = failedOnDemandMcpNames(names)
+      const failed = (await listIntegrations()).integrations.filter((item) =>
+        item.kind === "mcp" && (!names || names.includes(item.name)) && integrationNeedsAttention(item))
       if (!failed.length) {
         lastNotifiedMcpFailureKey = ""
         return
       }
-      const key = failed.sort().join("|")
+      const key = failed.map((item) => `${item.id}:${item.status}`).sort().join("|")
       if (key === lastNotifiedMcpFailureKey) return
       lastNotifiedMcpFailureKey = key
-      const label = failed.length === 1 ? failed[0] : `${failed.length} on-demand MCPs`
       await (client as any).tui?.showToast?.({
-        body: {
-          title: "Raven MCP warning",
-          message: `${label} failed to load. Run /raven mcp for details.`,
-          variant: "warning",
-          duration: 12000,
-        },
+        body: integrationRefreshToast({ integrations: failed }),
       })
     } catch { /* MCP failure notifications are best-effort */ }
   }
@@ -2230,16 +2303,10 @@ Then restart opencode for the model change to take effect. If the task can be co
   return {
     listMcps,
     mcpAction,
-    async refreshMcps(serverName?: string) {
-      // V2 clients present the refresh lifecycle themselves, including failures.
-      mcpFailureToastPending = false
-      // First attachment shares the startup probe; later attachments force a
-      // fresh health/tool-discovery check even when cached status is ready.
-      const result = await (!serverName && !mcpStartupRefreshComplete
-        ? scheduleOnDemandMcpRefresh()
-        : queueOnDemandMcpRefresh(true, serverName))
-      return result
-    },
+    refreshMcps,
+    listIntegrations,
+    integrationAction,
+    refreshIntegrations,
     globalMcpRouting(names: string[]) {
       globalMcpServers = uniqueStrings(names)
       const onDemandNames = new Set(activeOnDemandMcpEntries().map(([name]) => name.toLowerCase()))
@@ -2801,7 +2868,14 @@ Then restart opencode for the model change to take effect. If the task can be co
       }
       if (mcpFailureToastPending) {
         mcpFailureToastPending = false
-        void scheduleOnDemandMcpRefresh().then((result) => notifyIfMcpFailures(result.failed))
+        // The V2 terminal companion owns startup check notifications.
+        if (host === "v1") {
+          void Promise.resolve((client as any).tui?.showToast?.({ body: integrationRefreshingToast() }))
+            .then(() => scheduleOnDemandMcpRefresh()).then(async () =>
+            (client as any).tui?.showToast?.({ body: integrationRefreshToast(await listIntegrations()) }))
+            .catch((error) => (client as any).tui?.showToast?.({ body: integrationRefreshErrorToast(error) }))
+            .catch(() => {})
+        }
       }
       if (duplicateMcpToastPending) {
         duplicateMcpToastPending = false
@@ -2826,6 +2900,13 @@ Then restart opencode for the model change to take effect. If the task can be co
         output.parts.push({ type: "text", text: helpText() })
       } else if (arg === "stats") {
         output.parts.push({ type: "text", text: statsText() })
+      } else if (arg === "integrations") {
+        output.parts.push({ type: "text", text: `${integrationSummary((await listIntegrations()).integrations)}\n\n/raven-integrations · /raven integrations refresh [mcp:name|cli:name]` })
+      } else if (integrationRefreshArguments(raw)) {
+        const id = integrationRefreshArguments(raw)!.id
+        if (host === "v1") await (client as any).tui?.showToast?.({ body: integrationRefreshingToast(id) })
+        const result = await refreshIntegrations(id)
+        output.parts.push({ type: "text", text: integrationRefreshToast(result).message })
       } else if (arg === "route") {
         output.parts.push({ type: "text", text: `${routeSummary()}\n\nUsage:\n  /raven route tool add <tool_name>\n  /raven route tool remove <tool_name>\n  /raven route keyword add <keyword>\n  /raven route keyword remove <keyword>\n\nGlobal MCPs are auto-routed by detected OpenCode MCP server name.` })
       } else if (arg.startsWith("route ")) {
@@ -2849,7 +2930,7 @@ Then restart opencode for the model change to take effect. If the task can be co
           output.parts.push({ type: "text", text: routeSummary() })
         }
       } else if (arg === "act") {
-        output.parts.push({ type: "text", text: `Raven Act: ${modelLabel(config.raven_act)}. Timeout: ${config.raven_act.timeout ?? 600}s.\nOne operator for MCP and CLI; asks auto-approved, explicit denies respected.\n\n${mcpSummary()}\n\n${cliSummary()}` })
+        output.parts.push({ type: "text", text: `Raven Act · ${modelLabel(config.raven_act)}\nEffort ${config.raven_act.reasoning_effort || "low"} · timeout ${config.raven_act.timeout ?? 600}s\nAsks auto-approved · explicit denies respected\n\n${integrationSummary((await listIntegrations()).integrations)}` })
       } else if (arg === "cli" || arg.startsWith("cli ")) {
         const usage = "Usage:\n  /raven cli add <name> <JSON definition>\n  /raven cli enable|disable|remove <name>\n  /raven cli reload\n\nShared operator settings:\n  /raven act model <provider/model>|auto\n  /raven act timeout <seconds>\n\nDefinition example: {\"command\":[\"blender\"],\"description\":\"Blender rendering and automation\"}\nRegister trusted tools only. Nothing is executed during registration."
         const [, action = "", ...rest] = raw.split(/\s+/)
@@ -2941,14 +3022,6 @@ Then restart opencode for the model change to take effect. If the task can be co
           } catch (error) {
             output.parts.push({ type: "text", text: error instanceof McpAuthRequiredError ? error.message : `Could not ${action === "auth" ? "start OAuth sign-in" : "clear OAuth credentials"}. Check the server's URL, OAuth settings, credential directory, and callback port.` })
           }
-        } else if (action === "refresh") {
-          const serverName = parts.slice(2).join(" ").trim() || undefined
-          const result = await queueOnDemandMcpRefresh(true, serverName)
-          await notifyIfMcpFailures(result.failed)
-          output.parts.push({
-            type: "text",
-            text: `On-demand MCP refresh complete.\n  Refreshed: ${result.refreshed.length ? result.refreshed.join(", ") : "none"}\n  Failed: ${result.failed.length ? result.failed.join(", ") : "none"}`,
-          })
         } else if (action === "detail") {
           const detail = parts[2]?.toLowerCase()
           if (detail !== "full" && detail !== "minimized") {
@@ -2977,19 +3050,16 @@ Then restart opencode for the model change to take effect. If the task can be co
       } else {
         const seek = config.raven_seek
         const act = config.raven_act
-        const seekIssue = ravenProviderIssues.seek ? `\n  Provider issue: ${ravenProviderIssues.seek}` : ""
-        const actIssue = ravenProviderIssues.act ? `\n  Provider issue: ${ravenProviderIssues.act}` : ""
-        let update = "Update: unable to check npm."
+        const seekIssue = ravenProviderIssues.seek ? "\n! Search provider unavailable · /raven seek model <provider/model>" : ""
+        const actIssue = ravenProviderIssues.act ? "\n! Act provider unavailable · /raven act model <provider/model>" : ""
+        let update = ""
         try {
           const info = await getUpdateInfo()
           update = info.available && info.latest
-            ? `Update: ${info.latest} available. Run /raven update, then restart opencode.`
-            : info.latest
-              ? `Update: up to date (latest ${info.latest}).`
-              : "Update: unable to check npm."
+            ? `\nUpdate ${info.latest} available · /raven update` : ""
         } catch { /* keep fallback */ }
         const setup = modelSetupInstructions()
-        output.parts.push({ type: "text", text: `Raven version: ${PACKAGE_VERSION}.\nSearch agent: ${modelLabel(seek)}. Reasoning: ${seek.reasoning_effort || fm.reasoning_effort || "(default)"}. Timeout: ${seek.timeout ?? 600}s.${seekIssue}\nAct agent (MCP/CLI): ${modelLabel(act)}. Reasoning: ${act.reasoning_effort || actFm.reasoning_effort || "(default)"}. Timeout: ${act.timeout ?? 600}s.${actIssue}\n${update}${setup ? `\n\n${setup}` : ""}\n\n${routeSummary()}\n\n${mcpSummary()}\n\n${cliSummary()}\n\n${statsText()}\n\nRun /raven help for commands.` })
+        output.parts.push({ type: "text", text: `Raven ${PACKAGE_VERSION}\nSearch  ${modelLabel(seek)}${seekIssue}\nAct     ${modelLabel(act)}${actIssue}${update}${setup ? `\n\n${setup}` : ""}\n\n${integrationSummary((await listIntegrations()).integrations)}\n\nContext saved · session ~${formatTokens(sessionBytes)} · total ~${formatTokens(totalBytes)} tokens\n/raven-integrations · /raven help` })
       }
     },
 

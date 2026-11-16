@@ -4,7 +4,7 @@ import type { SessionMessageInfo, SessionInfo } from "@opencode/client"
 import { z } from "zod"
 import createRavenRuntime from "./raven-core"
 import { backgroundDelegations } from "./background"
-import { RavenRpc, mcpRefreshArguments, mcpRefreshToast } from "./rpc"
+import { RavenRpc, integrationRefreshArguments, integrationRefreshToast, integrationRefreshingToast, integrationRefreshErrorToast } from "./rpc"
 
 type Context = Plugin.Context
 type RequestOptions = NonNullable<Parameters<Context["session"]["get"]>[1]>
@@ -215,6 +215,9 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       return { text: output.parts.map((part) => part.text).join("\n") }
     }
     const rpc = await ctx.rpc.register(RavenRpc, {
+      listIntegrations: async () => raven.listIntegrations(),
+      integrationAction: async ({ id, action }) => raven.integrationAction(id, action),
+      refreshIntegrations: async ({ id }) => raven.refreshIntegrations(id),
       listMcps: async () => raven.listMcps(),
       mcpAction: async ({ serverName, action }) => raven.mcpAction(serverName, action),
       command: async ({ arguments: raw }) => executeCommand(raw),
@@ -340,18 +343,18 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
       editor.add({
         name: "raven", description: "Manage Raven routing, MCPs, CLIs, models, timeouts, updates, and status",
         async execute({ sessionID, prompt }) {
-          if (prompt.text.trim().toLowerCase() === "mcp") {
-            await emitNotice({ kind: "mcp", sessionID, message: "Raven MCPs" })
+          if (["mcp", "integrations"].includes(prompt.text.trim().toLowerCase())) {
+            await emitNotice({ kind: "integrations", sessionID, message: "Raven integrations" })
             return
           }
-          const refresh = mcpRefreshArguments(prompt.text)
+          const refresh = integrationRefreshArguments(prompt.text)
           if (refresh) {
-            await emitNotice({ kind: "toast", sessionID, title: "Raven MCP", message: `Refreshing ${refresh.serverName ?? "on-demand MCPs"}…`, variant: "info" })
+            await emitNotice({ kind: "toast", sessionID, ...integrationRefreshingToast(refresh.id) })
             try {
-              const result = await raven.refreshMcps(refresh.serverName)
-              await emitNotice({ kind: "toast", sessionID, ...mcpRefreshToast(result) })
+              const result = await raven.refreshIntegrations(refresh.id)
+              await emitNotice({ kind: "toast", sessionID, ...integrationRefreshToast(result) })
             } catch (error) {
-              await emitNotice({ kind: "toast", sessionID, title: "Raven MCP", message: `Refresh failed: ${String(error)}`, variant: "error" })
+              await emitNotice({ kind: "toast", sessionID, ...integrationRefreshErrorToast(error) })
             }
             return
           }
@@ -360,8 +363,8 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
         },
       })
       editor.add({
-        name: "raven-mcps", description: "Open Raven's on-demand MCP manager",
-        async execute({ sessionID }) { await emitNotice({ kind: "mcp", sessionID, message: "Raven MCPs" }) },
+        name: "raven-integrations", description: "Manage Raven's MCP and CLI integrations",
+        async execute({ sessionID }) { await emitNotice({ kind: "integrations", sessionID, message: "Raven integrations" }) },
       })
     }))
 

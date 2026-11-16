@@ -635,11 +635,11 @@ function v2Fixture() {
   }
 }
 
-async function setupV2(fixture = v2Fixture(), servers: Record<string, any> = {}) {
+async function setupV2(fixture = v2Fixture(), servers: Record<string, any> = {}, clis: Record<string, any> = {}) {
   mkdirSync(ravenConfigDir, { recursive: true })
   writeFileSync(ravenConfigFile, JSON.stringify({
     raven_seek: { model: "provider/search" },
-    raven_act: { model: "provider/mcp", onDemandMcpServers: servers },
+    raven_act: { model: "provider/mcp", onDemandMcpServers: servers, onDemandClis: clis },
   }))
   const cleanup = await RavenModule.setup(fixture.ctx as unknown as V2Plugin.Context)
   return { ...fixture, cleanup: cleanup as () => Promise<void> }
@@ -1043,14 +1043,44 @@ describe("OpenCode 2 integration", () => {
     } finally { await f.cleanup() }
   })
 
-  test("native MCP refresh commands emit only progress and result toasts", async () => {
-    const f = await setupV2()
+  test("native integration refresh emits progress and one compact result without a model turn", async () => {
+    const f = await setupV2(v2Fixture(), {
+      available: { type: "local", command: [process.execPath], enabled: false },
+    }, {
+      available: { command: [process.execPath], cwd: process.cwd(), description: "Long descriptions belong in details." },
+      missing: { command: ["raven-nonexistent-executable-9274"], cwd: process.cwd() },
+      disabled: { command: ["also-missing"], enabled: false },
+    })
     try {
-      await f.commands.raven.execute({ sessionID: "ses_parent", prompt: { text: "mcp refresh" } })
+      await f.commands.raven.execute({ sessionID: "ses_parent", prompt: { text: "integrations refresh" } })
       expect(f.rpcEmit.mock.calls).toEqual([
-        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "info", message: expect.stringContaining("Refreshing") })],
-        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "success", message: expect.stringContaining("Refresh complete") })],
+        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "info", message: "Refreshing integrations…" })],
+        ["notice", expect.objectContaining({ kind: "toast", sessionID: "ses_parent", variant: "warning", message: "[CLI] missing — executable not found or not directly runnable" })],
       ])
+      const result = await f.rpcHandlers.listIntegrations({})
+      expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)))
+      expect(result.integrations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "cli:available", status: "available", executable: process.execPath }),
+        expect.objectContaining({ id: "cli:missing", status: "failed" }),
+        expect.objectContaining({ id: "cli:disabled", status: "disabled" }),
+        expect.objectContaining({ id: "mcp:available", transport: "stdio", status: "disabled" }),
+      ]))
+      await expect(f.rpcHandlers.refreshIntegrations({ id: "available" })).rejects.toThrow("Ambiguous")
+      const targeted = await f.rpcHandlers.refreshIntegrations({ id: "cli:available" })
+      expect(targeted.integrations).toHaveLength(1)
+      expect(targeted.integrations[0].status).toBe("available")
+      await f.rpcHandlers.integrationAction({ id: "cli:missing", action: "disable" })
+      const checked = await f.rpcHandlers.refreshIntegrations({})
+      expect(checked.integrations.find((item: any) => item.id === "cli:available").status).toBe("available")
+      const summary = (await f.rpcHandlers.command({ arguments: "status" })).text
+      expect(summary).toContain("1 ready · 3 disabled")
+      expect(summary).toContain("CLI · Available")
+      expect(summary).not.toContain("Long descriptions")
+      expect(summary).not.toContain("also-missing")
+      expect(summary).not.toContain("Timeout:")
+      await expect(f.rpcHandlers.integrationAction({ id: "cli:available", action: "auth" })).rejects.toThrow("do not use MCP")
+      expect(f.commands["raven-integrations"]).toBeDefined()
+      expect(f.commands["raven-mcps"]).toBeUndefined()
       expect(f.session.synthetic).not.toHaveBeenCalled()
       expect(f.session.prompt).not.toHaveBeenCalled()
       expect(f.session.create).not.toHaveBeenCalled()
@@ -1082,6 +1112,9 @@ describe("OpenCode 2 integration", () => {
       const initial = await Promise.all([f.rpcHandlers.refreshMcps({}), f.rpcHandlers.refreshMcps({})])
       expect(initial).toEqual([{ refreshed: ["fixture"], failed: [] }, { refreshed: ["fixture"], failed: [] }])
       expect(probes).toBe(1)
+      expect((await f.rpcHandlers.listIntegrations({})).integrations[0]).toMatchObject({
+        id: "mcp:fixture", kind: "mcp", transport: "http", status: "ready",
+      })
       expect(f.hooks["session.context"]).toBeDefined()
 
       toolName = "updated_tool"
@@ -1090,7 +1123,7 @@ describe("OpenCode 2 integration", () => {
         f.rpcHandlers.command({ arguments: "mcp refresh" }),
       ])
       expect(fresh).toEqual({ refreshed: ["fixture"], failed: [] })
-      expect(manual.text).toContain("Refreshed: fixture")
+      expect(manual.text).toBe("Integration checks passed.")
       expect(probes).toBe(2)
       for (const agent of ["build", "raven-act"]) {
         const guidance = { sessionID: "ses_parent", agent, system: [] as any[] }
@@ -1119,102 +1152,120 @@ describe("OpenCode 2 integration", () => {
     }
   })
 
-  test("each new TUI launch refreshes MCPs without blocking and reports RPC errors", async () => {
-    const pending = Promise.withResolvers<{ refreshed: string[]; failed: string[] }>()
-    const refreshMcps = mock((_input: any, _options: any) => pending.promise)
+  test("each new TUI launch checks integrations without blocking and reports RPC errors", async () => {
+    const pending = Promise.withResolvers<{ integrations: any[] }>()
+    const refreshIntegrations = mock((_input: any, _options: any) => pending.promise)
     const toast = mock((_notice: any) => {})
     const unsubscribe = mock(() => {})
     const ctx = {
       storage: tuiStorage(),
-      client: { rpc: () => ({ refreshMcps, events: { on: () => unsubscribe } }) },
+      client: { rpc: () => ({ refreshIntegrations, events: { on: () => unsubscribe } }) },
       data: { location: { default: () => ({ directory: "C:\\workspace" }) } },
       keymap: { layer: () => {} },
       ui: { toast: { show: toast } },
     }
     const closeFirst = RavenTui.setup(ctx as any)
-    expect(refreshMcps).toHaveBeenCalledTimes(1)
-    expect(toast.mock.calls[0][0]).toMatchObject({ variant: "info", message: expect.stringContaining("Refreshing") })
+    expect(refreshIntegrations).toHaveBeenCalledTimes(1)
+    expect(toast.mock.calls[0][0]).toMatchObject({ variant: "info", message: "Refreshing integrations…" })
     closeFirst()
     const closeSecond = RavenTui.setup({ ...ctx, storage: tuiStorage() } as any)
     try {
-      expect(refreshMcps).toHaveBeenCalledTimes(2)
-      expect(refreshMcps.mock.calls[1][1].location).toEqual({ directory: "C:\\workspace" })
+      expect(refreshIntegrations).toHaveBeenCalledTimes(2)
+      expect(refreshIntegrations.mock.calls[1][1].location).toEqual({ directory: "C:\\workspace" })
       pending.reject(new Error("RPC disconnected"))
       await pending.promise.catch(() => {})
       await Promise.resolve()
-      expect(toast).toHaveBeenCalledTimes(3) // Two progress toasts, only the open client's error.
-      expect(toast.mock.calls[2][0].message).toContain("/raven mcp refresh")
+      expect(toast).toHaveBeenCalledTimes(3) // Two progress toasts; only the open client's error.
+      expect(toast.mock.calls[2][0].message).toContain("Lost contact with the OpenCode service")
+      expect(toast.mock.calls[2][0].message).toContain("/raven integrations refresh")
     } finally { closeSecond() }
   })
 
   test("returning from sessions or reactivating a plugin does not repeat the startup refresh", async () => {
-    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: ["context7"], failed: [] }))
+    const refreshIntegrations = mock(async (_input: any, _options: any) => ({ integrations: [] }))
     const toast = mock((_notice: any) => {})
     const storage = tuiStorage()
     let layer: any
     const ctx = {
       storage,
       location: { directory: "C:\\workspace" },
-      client: { rpc: () => ({ refreshMcps, events: { on: () => () => {} } }) },
+      client: { rpc: () => ({ refreshIntegrations, events: { on: () => () => {} } }) },
       keymap: { layer: (factory: any) => { layer = factory() } },
       ui: { toast: { show: toast } },
     }
     const first = RavenTui.setup(ctx as any)
-    await layer.commands[0].run("/raven mcp refresh") // Wait for the shared startup check.
+    await layer.commands[0].run("/raven integrations refresh") // Wait for the shared startup check.
     first()
     const second = RavenTui.setup({ ...ctx } as any)
     try {
-      expect(refreshMcps).toHaveBeenCalledTimes(1)
+      expect(refreshIntegrations).toHaveBeenCalledTimes(1)
       expect(toast).toHaveBeenCalledTimes(2)
-      await layer.commands[0].run("/raven mcp refresh")
-      expect(refreshMcps).toHaveBeenCalledTimes(2) // Explicit refresh still works.
+      await layer.commands[0].run("/raven integrations refresh")
+      expect(refreshIntegrations).toHaveBeenCalledTimes(2) // Explicit refresh still works.
     } finally { second() }
     const third = RavenTui.setup({ ...ctx } as any)
-    expect(refreshMcps).toHaveBeenCalledTimes(2)
+    expect(refreshIntegrations).toHaveBeenCalledTimes(2)
     third()
     const otherWorkspace = RavenTui.setup({ ...ctx, location: { directory: "C:\\other" } } as any)
-    await layer.commands[0].run("/raven mcp refresh")
-    expect(refreshMcps).toHaveBeenCalledTimes(3)
+    await layer.commands[0].run("/raven integrations refresh")
+    expect(refreshIntegrations).toHaveBeenCalledTimes(3)
     otherWorkspace()
     const back = RavenTui.setup(ctx as any)
-    expect(refreshMcps).toHaveBeenCalledTimes(3)
+    expect(refreshIntegrations).toHaveBeenCalledTimes(3)
     back()
   })
 
   test("manual and automatic refreshes show only notifications, including partial failures", async () => {
-    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: ["context7"], failed: [] as string[] }))
+    const healthy = { id: "mcp:context7", name: "context7", kind: "mcp" as const, transport: "http" as const, enabled: true, status: "ready" as const, description: "" }
+    const refreshIntegrations = mock(async (_input: any, _options: any) => ({ integrations: [healthy] as any[] }))
     const command = mock(async () => ({ text: "Unexpected dialog" }))
     const toast = mock((_notice: any) => {})
     const show = mock(() => {})
     let layer: any
     const cleanup = RavenTui.setup({
       storage: tuiStorage(),
-      client: { rpc: () => ({ command, refreshMcps, events: { on: () => () => {} } }) },
+      client: { rpc: () => ({ command, refreshIntegrations, events: { on: () => () => {} } }) },
       location: { directory: "C:\\workspace" },
       keymap: { layer: (factory: any) => { layer = factory() } },
       ui: { dialog: { show }, toast: { show: toast } },
     } as any)
     try {
-      await layer.commands[0].run("/raven mcp refresh") // Shares the attachment check already in flight.
-      expect(refreshMcps).toHaveBeenCalledTimes(1)
+      await layer.commands[0].run("/raven integrations refresh") // Shares the attachment check already in flight.
+      expect(refreshIntegrations).toHaveBeenCalledTimes(1)
       expect(toast.mock.calls.map(([notice]) => notice.variant)).toEqual(["info", "success"])
-      expect(toast.mock.calls[1][0].message).toContain("context7")
+      expect(toast.mock.calls[0][0].message).toBe("Refreshing integrations…")
+      expect(toast.mock.calls[1][0].message).toBe("Integration checks passed.")
       toast.mockClear()
-      refreshMcps.mockImplementation(async () => ({ refreshed: ["context7"], failed: ["exa"] }))
-      await layer.commands[0].run("/raven mcp refresh")
+      refreshIntegrations.mockImplementation(async () => ({ integrations: [
+        healthy,
+        { ...healthy, id: "mcp:exa", name: "exa", status: "failed", lastError: "403 Forbidden" },
+        { ...healthy, id: "mcp:local", name: "local", transport: "stdio", status: "auth_required" },
+        { ...healthy, id: "cli:unity", name: "unity", kind: "cli", transport: "cli", status: "failed", lastError: "Executable not found or not directly runnable; scripts need an explicit interpreter" },
+        { ...healthy, id: "cli:disabled", name: "disabled", kind: "cli", enabled: false, status: "disabled" },
+      ] }))
+      await layer.commands[0].run("/raven integrations refresh")
       expect(toast.mock.calls.map(([notice]) => notice.variant)).toEqual(["info", "warning"])
-      expect(toast.mock.calls[1][0].message).toContain("Failed: exa")
+      expect(toast.mock.calls[1][0].message).toContain("[MCP · HTTP] exa — access denied")
+      expect(toast.mock.calls[1][0].message).toContain("[MCP · STDIO] local — sign-in required")
+      expect(toast.mock.calls[1][0].message).toContain("[CLI] unity — executable not found")
+      expect(toast.mock.calls[1][0].message).not.toContain("context7")
+      expect(toast.mock.calls[1][0].message).not.toContain("disabled")
       expect(command).not.toHaveBeenCalled()
       expect(show).not.toHaveBeenCalled()
-      await layer.commands[0].run("/raven mcp refresh context7")
-      expect(refreshMcps.mock.calls[2][0]).toEqual({ serverName: "context7" })
+      await layer.commands[0].run("/raven integrations refresh mcp:context7")
+      expect(refreshIntegrations.mock.calls[2][0]).toEqual({ id: "mcp:context7" })
       expect(show).not.toHaveBeenCalled()
+      toast.mockClear()
+      refreshIntegrations.mockImplementation(async () => { throw new Error("Server failed to encode its response.") })
+      await layer.commands[0].run("/raven integrations refresh")
+      expect(toast.mock.calls.map(([notice]) => notice.variant)).toEqual(["info", "error"])
+      expect(toast.mock.calls[1][0].message).toContain("response could not be encoded")
     } finally { cleanup() }
   })
 
   test("terminal companion displays scrollable command output and filters notices by location", async () => {
     const command = mock(async (_input: any, _options: any) => ({ text: "Raven status" }))
-    const refreshMcps = mock(async (_input: any, _options: any) => ({ refreshed: [], failed: [] }))
+    const refreshIntegrations = mock(async (_input: any, _options: any) => ({ integrations: [] }))
     const screen = await createTestRenderer({ width: 74, height: 24 })
     let dialog!: BoxRenderable
     const show = mock((render: () => any) => { dialog = render(); screen.renderer.root.add(dialog) })
@@ -1225,7 +1276,7 @@ describe("OpenCode 2 integration", () => {
     let layer: any
     const cleanup = RavenTui.setup({
       storage: tuiStorage(),
-      client: { rpc: () => ({ command, refreshMcps, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
+      client: { rpc: () => ({ command, refreshIntegrations, events: { on: (_name: string, callback: any) => { receive = callback; return unsubscribe } } }) },
       location: { directory: "C:\\workspace" },
       renderer: screen.renderer,
       theme: { surface: () => ({ background: { base: RGBA.fromValues(0.1, 0.1, 0.1, 0) }, text: { base: RGBA.fromHex("#ffffff"), muted: RGBA.fromHex("#aaaaaa") } }) },
@@ -1233,7 +1284,7 @@ describe("OpenCode 2 integration", () => {
       ui: { dialog: { show, set }, toast: { show: toast }, router: { current: () => ({ type: "session", sessionID: "ses_parent" }) } },
     } as any)
     try {
-      expect(refreshMcps).toHaveBeenCalledWith({}, expect.objectContaining({ location: { directory: "C:\\workspace" }, signal: expect.any(AbortSignal) }))
+      expect(refreshIntegrations).toHaveBeenCalledWith({}, expect.objectContaining({ location: { directory: "C:\\workspace" }, signal: expect.any(AbortSignal) }))
       expect(show).not.toHaveBeenCalled()
       await layer.commands[0].run("/raven help")
       expect(command).toHaveBeenCalledWith({ arguments: "help" }, { location: { directory: "C:\\workspace" } })
@@ -1281,7 +1332,7 @@ describe("OpenCode 2 integration", () => {
       screen.renderer.destroy()
     }
     expect(unsubscribe).toHaveBeenCalledTimes(1)
-    expect(refreshMcps.mock.calls[0][1].signal.aborted).toBe(true)
+    expect(refreshIntegrations.mock.calls[0][1].signal.aborted).toBe(true)
   })
 
   test("rejects foreign roots, the wrong agent, and switched-agent history", async () => {

@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode/plugin/tui"
-import { RavenRpc, mcpRefreshArguments, mcpRefreshToast } from "./rpc"
-import { createMcpManager } from "./mcp-ui"
+import { RavenRpc, integrationRefreshArguments, integrationRefreshToast, integrationRefreshingToast, integrationRefreshErrorToast } from "./rpc"
+import { createIntegrationManager } from "./integrations-ui"
 
 export default {
   id: "opencode-raven.tui",
@@ -8,18 +8,18 @@ export default {
     const rpc = ctx.client.rpc(RavenRpc)
     const refreshController = new AbortController()
     const refreshes = new Map<string, Promise<void>>()
-    const refreshMcps = (input: { serverName?: string } = {}) => {
-      const key = input.serverName?.toLowerCase() ?? "*"
+    const refreshIntegrations = (input: { id?: string } = {}) => {
+      const key = input.id?.toLowerCase() ?? "*"
       const pending = refreshes.get(key)
       if (pending) return pending
-      ctx.ui.toast.show({ title: "Raven MCP", message: `Refreshing ${input.serverName ?? "on-demand MCPs"}…`, variant: "info", duration: 3000 })
-      const run = rpc.refreshMcps(input, {
+      ctx.ui.toast.show(integrationRefreshingToast(input.id))
+      const run = rpc.refreshIntegrations(input, {
         location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal,
       }).then((result) => {
-        if (!refreshController.signal.aborted) ctx.ui.toast.show(mcpRefreshToast(result))
+        if (!refreshController.signal.aborted) ctx.ui.toast.show(integrationRefreshToast(result))
       }).catch((error) => {
         if (refreshController.signal.aborted) return
-        ctx.ui.toast.show({ title: "Raven MCP", message: `Refresh failed: ${String(error)}. Retry /raven mcp refresh.`, variant: "error", duration: 6000 })
+        ctx.ui.toast.show(integrationRefreshErrorToast(error))
       }).finally(() => refreshes.delete(key))
       refreshes.set(key, run)
       return run
@@ -59,10 +59,10 @@ export default {
       })
       ctx.ui.dialog.set({ size: "large", centered: true })
     }
-    const mcpManager = createMcpManager(ctx, {
-      list: () => rpc.listMcps({}, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
-      action: (serverName, action) => rpc.mcpAction({ serverName, action }, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
-      refresh: (serverName) => refreshMcps(serverName ? { serverName } : {}),
+    const integrationManager = createIntegrationManager(ctx, {
+      list: () => rpc.listIntegrations({}, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
+      action: (id, action) => rpc.integrationAction({ id, action }, { location: ctx.location ?? ctx.data.location.default(), signal: refreshController.signal }),
+      refresh: (id) => refreshIntegrations(id ? { id } : {}),
     }, refreshController.signal)
     const unsubscribe = rpc.events.on("notice", async (event) => {
       const location = ctx.location ?? ctx.data.location.default()
@@ -71,10 +71,10 @@ export default {
         const route = ctx.ui.router.current()
         if (route.type !== "session" || route.sessionID !== event.data.sessionID) return
       }
-      if (event.data.kind === "mcp") {
+      if (event.data.kind === "integrations") {
         // Keep the event stream free for OAuth/refresh completion notices while
         // the interactive dialog is awaiting input.
-        void mcpManager.open()
+        void integrationManager.open()
       } else if (event.data.kind === "command") {
         const route = ctx.ui.router.current()
         if (route.type !== "session" || route.sessionID !== event.data.sessionID) return
@@ -86,22 +86,22 @@ export default {
     // Plugin activation can repeat during a single TUI's lifetime. Memory state
     // survives those reloads, but resets on a real TUI restart (unlike disk state).
     const location = ctx.location ?? ctx.data.location.default()
-    const [startup, updateStartup] = ctx.storage.memory("mcp-startup-refresh", {
+    const [startup, updateStartup] = ctx.storage.memory("integration-startup-refresh", {
       initial: { directories: [] as string[] },
     })
     if (!startup.directories.includes(location.directory)) {
       updateStartup((state) => { state.directories.push(location.directory) })
-      void refreshMcps()
+      void refreshIntegrations()
     }
     ctx.keymap.layer(() => ({ commands: [{
-      id: "raven", title: "Raven", description: "Manage Raven routing, MCPs, models, and status",
+      id: "raven", title: "Raven", description: "Manage Raven integrations, routing, models, and status",
       slash: { name: "raven", arguments: true },
       async run(input = "") {
         try {
           const args = input.replace(/^\s*\/raven(?:\s+|$)/i, "").trim()
-          if (args.toLowerCase() === "mcp") { await mcpManager.open(); return }
-          const refresh = mcpRefreshArguments(args)
-          if (refresh) { await refreshMcps(refresh); return }
+          if (args.toLowerCase() === "integrations" || args.toLowerCase() === "mcp") { await integrationManager.open(); return }
+          const refresh = integrationRefreshArguments(args)
+          if (refresh) { await refreshIntegrations(refresh); return }
           const result = await rpc.command({ arguments: args }, { location: ctx.location ?? ctx.data.location.default() })
           await show(result.text)
         } catch (error) {
@@ -109,12 +109,12 @@ export default {
         }
       },
     }, {
-      id: "raven-mcps", title: "Raven MCPs", description: "Manage Raven's on-demand MCP servers",
-      palette: true, slash: { name: "raven-mcps" }, run: () => mcpManager.open(),
+      id: "raven-integrations", title: "Raven integrations", description: "Manage Raven's MCP and CLI integrations",
+      palette: true, slash: { name: "raven-integrations" }, run: () => integrationManager.open(),
     }] }))
     return () => {
       refreshController.abort()
-      mcpManager.dispose()
+      integrationManager.dispose()
       unsubscribe()
     }
   },

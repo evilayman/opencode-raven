@@ -1,15 +1,10 @@
 import type { Plugin } from "@opencode/plugin/tui"
-import type { RavenMcpAction, RavenMcpServer } from "./rpc"
+import { integrationStatus as STATUS, integrationType, type RavenMcpAction, type RavenIntegration } from "./rpc"
 
 interface ManagerApi {
-  list(): Promise<{ servers: RavenMcpServer[] }>
-  action(serverName: string, action: RavenMcpAction): Promise<{ text: string; authorizationUrl?: string }>
-  refresh(serverName?: string): Promise<unknown>
-}
-
-const STATUS: Record<RavenMcpServer["status"], string> = {
-  connected: "Connected", ready: "Ready · on demand", pending: "Not checked",
-  failed: "Failed", auth_required: "Needs sign-in", authorizing: "Signing in…", disabled: "Disabled",
+  list(): Promise<{ integrations: RavenIntegration[] }>
+  action(id: string, action: RavenMcpAction): Promise<{ text: string; authorizationUrl?: string }>
+  refresh(id?: string): Promise<unknown>
 }
 
 // Run the platform opener on the TUI's machine, not the background server.
@@ -34,7 +29,7 @@ async function openBrowser(value: string, signal: AbortSignal): Promise<boolean>
   } catch { return false }
 }
 
-export function createMcpManager(ctx: Plugin.Context, api: ManagerApi, signal: AbortSignal) {
+export function createIntegrationManager(ctx: Plugin.Context, api: ManagerApi, signal: AbortSignal) {
   let pending: Promise<void> | undefined
   let showing = false
   const modal = async <T>(show: () => Promise<T>): Promise<T | undefined> => {
@@ -53,25 +48,29 @@ export function createMcpManager(ctx: Plugin.Context, api: ManagerApi, signal: A
   }
   signal.addEventListener("abort", stop, { once: true })
 
-  async function manageServer(name: string) {
+  async function manageIntegration(id: string) {
     while (!signal.aborted) {
-      const server = (await api.list()).servers.find((item) => item.name === name)
+      const server = (await api.list()).integrations.find((item) => item.id === id)
       if (!server || signal.aborted) return false
+      const name = server.name
       const options: { title: string; value: RavenMcpAction | "refresh" | "details" | "back"; description?: string }[] = []
       if (server.enabled) {
         if (server.oauth) options.push({
           title: server.status === "authorizing" ? "Continue browser sign-in" : server.authenticated ? "Sign in again" : "Sign in",
           value: "auth", description: "Open the authorization page in your browser",
         })
-        options.push({ title: "Refresh connection and tools", value: "refresh", description: "Check server health and rediscover tools" })
+        options.push({
+          title: server.kind === "cli" ? "Check executable availability" : "Refresh connection and tools", value: "refresh",
+          description: server.kind === "cli" ? "Filesystem check only; no command is launched" : "Check server health and rediscover tools",
+        })
       }
       if (server.oauth && (server.authenticated || server.status === "authorizing" || server.lastError)) {
         options.push({ title: server.status === "authorizing" ? "Cancel sign-in / clear credentials" : "Sign out / clear credentials", value: "logout" })
       }
       options.push(
-        { title: server.enabled ? "Disable server" : "Enable server", value: server.enabled ? "disable" : "enable", description: "Saved in Raven configuration; takes effect immediately" },
-        { title: "Server details", value: "details", description: `${server.type} · ${server.toolCount} discovered tools` },
-        { title: "Back to Raven MCPs", value: "back" },
+        { title: server.enabled ? "Disable integration" : "Enable integration", value: server.enabled ? "disable" : "enable", description: "Saved in Raven configuration; takes effect immediately" },
+        { title: "Integration details", value: "details", description: integrationType(server) },
+        { title: "Back to Raven integrations", value: "back" },
       )
       const action = await select(`${name} · ${STATUS[server.status]}`, options)
       if (action === undefined || signal.aborted) return false
@@ -79,13 +78,17 @@ export function createMcpManager(ctx: Plugin.Context, api: ManagerApi, signal: A
       try {
         if (action === "details") {
           await alert(name, [
-            `Status: ${STATUS[server.status]}`, `Transport: ${server.type}`, `Discovered tools: ${server.toolCount}`,
-            server.oauth ? `OAuth: ${server.authenticated ? "credentials saved" : "not signed in"}` : "Authentication: managed by server configuration",
+            `Status: ${STATUS[server.status]}`, `Type: ${integrationType(server)}`,
+            server.kind === "mcp" ? `Discovered tools: ${server.toolCount ?? 0}` : "",
+            server.executable ? `Executable: ${server.executable}` : "", server.cwd ? `Working directory: ${server.cwd}` : "",
+            server.oauth ? `OAuth: ${server.authenticated ? "credentials saved" : "not signed in"}` : "",
             server.description, server.lastError ? `Last error: ${server.lastError}` : "",
-            "Ready means health/tool discovery succeeded. On-demand connections open when Raven uses the server.",
+            server.kind === "cli"
+              ? "Available means the executable and working directory exist. No command was run. App/Editor connectivity and CLI credentials are not checked."
+              : "Ready means health/tool discovery succeeded. On-demand connections open when Raven uses the server.",
           ].filter(Boolean).join("\n\n"))
         } else if (action === "refresh") {
-          await api.refresh(name)
+          await api.refresh(id)
         } else {
           if (action === "logout") {
             const confirmed = await modal(() => ctx.ui.dialog.confirm({
@@ -94,44 +97,48 @@ export function createMcpManager(ctx: Plugin.Context, api: ManagerApi, signal: A
             }))
             if (!confirmed || signal.aborted) continue
           }
-          const result = await api.action(name, action)
+          const result = await api.action(id, action)
           if (signal.aborted) return
           if (result.authorizationUrl) {
             const opened = await openBrowser(result.authorizationUrl, signal)
             await alert(`Sign in to ${name}`, `${opened ? "Browser opened. Approve access there, then return here for the completion notification." : "Could not open your browser automatically. Open the URL below to sign in."}\n\n${result.text}`)
           } else {
-            ctx.ui.toast.show({ title: "Raven MCP", message: result.text, variant: "info", duration: 6000 })
-            if (action === "enable") await api.refresh(name)
+            ctx.ui.toast.show({ title: "Raven", message: result.text, variant: "info", duration: 3000 })
+            if (action === "enable") await api.refresh(id)
             if (action === "disable") return true
           }
         }
       } catch (error) {
         if (signal.aborted) return
-        ctx.ui.toast.show({ title: "Raven MCP", message: String(error), variant: "error", duration: 6000 })
+        ctx.ui.toast.show({ title: "Raven", message: String(error), variant: "error", duration: 6000 })
       }
     }
   }
 
   async function run() {
     let current: string | undefined
+    let showDisabled = false
     while (!signal.aborted) {
-      const { servers } = await api.list()
+      const { integrations } = await api.list()
       if (signal.aborted) return
-      if (!servers.length) {
-        await alert("Raven MCPs", "No on-demand MCP servers configured. Add servers under raven_mcp.onDemandMcpServers in raven-config.json.")
+      if (!integrations.length) {
+        await alert("Raven integrations", "No integrations configured. Add raven_act.onDemandMcpServers or raven_act.onDemandClis in raven-config.json.")
         return
       }
-      const selected = await select("Raven MCPs", [
-        ...servers.map((server) => ({
-          title: server.name, value: `server:${server.name}`,
-          description: `${STATUS[server.status]} · ${server.type} · ${server.toolCount} tools${server.description ? ` · ${server.description.slice(0, 120)}` : ""}`,
+      const disabled = integrations.filter((item) => !item.enabled).length
+      const selected = await select("Raven integrations", [
+        ...integrations.filter((item) => showDisabled || item.enabled).map((server) => ({
+          title: server.name, value: `integration:${server.id}`,
+          description: `${integrationType(server)} · ${STATUS[server.status]}`,
         })),
-        { title: "Refresh all servers", value: "action:refresh", description: "Recheck enabled servers and rediscover tools" },
+        { title: "Refresh all integrations", value: "action:refresh", description: "Check MCP connections and CLI executable availability" },
+        ...(disabled ? [{ title: `${showDisabled ? "Hide" : "Show"} disabled (${disabled})`, value: "action:disabled" }] : []),
       ], current)
       if (selected === undefined || signal.aborted) return
       current = selected
       if (selected === "action:refresh") await api.refresh()
-      else if (!await manageServer(selected.slice("server:".length))) return
+      else if (selected === "action:disabled") showDisabled = !showDisabled
+      else if (!await manageIntegration(selected.slice("integration:".length))) return
     }
   }
 
@@ -139,7 +146,7 @@ export function createMcpManager(ctx: Plugin.Context, api: ManagerApi, signal: A
     open() {
       if (pending) return pending
       pending = run().catch((error) => {
-        if (!signal.aborted) ctx.ui.toast.show({ title: "Raven MCP", message: `Could not load servers: ${String(error)}`, variant: "error", duration: 6000 })
+        if (!signal.aborted) ctx.ui.toast.show({ title: "Raven", message: `Could not load integrations: ${String(error)}`, variant: "error", duration: 6000 })
       }).finally(() => { pending = undefined })
       return pending
     },

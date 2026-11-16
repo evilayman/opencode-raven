@@ -266,31 +266,47 @@ Per-server `timeout` values are milliseconds. Local servers inherit the OpenCode
 
 Generated MCP metadata and main-model guidance live beside `raven-config.json`. Refresh them with `/raven mcp refresh [server]`.
 
-### Interactive MCP manager (OpenCode V2)
+### Integration manager (OpenCode V2)
 
-Run `/raven mcp` or `/raven-mcps` to open Raven's searchable MCP popup. Click a
-server, or select it with the arrow keys and Enter, to see its actions:
+Run `/raven-integrations` or `/raven integrations` to open Raven's searchable
+integration manager. Remote MCPs, local stdio MCPs, and registered CLIs share one
+list, labeled **MCP · HTTP**, **MCP · STDIO**, or **CLI**. Select an entry for actions:
 
 - Sign in through the browser, continue a pending sign-in, or sign out.
-- Refresh the server's connection and discovered tools.
+- Refresh an MCP connection and discovered tools, or check a CLI executable.
 - Enable or disable it immediately, saving the setting in Raven's configuration.
-- View server details and the last connection error.
+- View descriptions, discovered tool counts, executable paths, and errors in details.
 
-The list includes disabled servers and shows connection/authentication status and
-discovered tool counts. **Ready · on demand** means discovery succeeded; it does
+Disabled entries are hidden by default; choose **Show disabled** to manage them.
+**Ready · on demand** means MCP discovery succeeded; it does
 not claim a permanent connection. **Connected** means Raven currently holds an
-open connection. Choose **Refresh all servers** to recheck enabled servers.
+open connection. **Available** for a CLI means its executable and working directory
+passed filesystem checks—not that an Editor/app is connected or authenticated.
+No CLI command, help, or version probe runs during startup or refresh.
+Choose **Refresh all integrations** or run `/raven integrations refresh`
+to recheck enabled integrations. To check one, append its name or a typed ID
+such as `mcp:basecamp` or `cli:unity` (required when names collide).
 Disabling closes cached connections and cancels pending sign-in without deleting
 saved credentials. Signing out asks for confirmation before clearing credentials.
 
 The sign-in action opens the browser on the TUI's machine and also displays the
 sign-in URL as a fallback. On a remote setup, the browser still needs access to the
 server's loopback callback. Escape closes the manager; an explicit **Back** action
-returns from a server's action menu to the server list.
+returns from an entry's action menu to the integration list.
 
-This menu manages Raven's on-demand servers only. OpenCode's native `/mcps` menu
-and globally registered servers are unchanged. OpenCode V1 keeps the text-based
-`/raven mcp` status command.
+Startup and refresh first show **Refreshing integrations…**, then a short success
+message when checks pass; otherwise only affected integrations are listed with
+type labels and concise failure reasons. A separate refresh error is reserved
+for plugin/service/transport problems, not ordinary connection failures. Long failure lists are
+capped; open the manager for full details. Disabled entries do not cause warnings.
+`/raven` shows a compact model/integration overview and context-savings totals;
+use `/raven route`, `/raven stats`, or entry details for expanded information.
+
+This menu manages Raven's on-demand MCPs and registered CLIs. OpenCode's native
+`/mcps` menu and globally registered servers are unchanged. OpenCode V1 supports
+text-based `/raven integrations` and `/raven integrations refresh`.
+The former `/raven-mcps` command has been removed; `/raven mcp` remains available
+for MCP-specific commands and opens the unified manager on V2.
 
 ### OAuth sign-in
 
@@ -490,11 +506,13 @@ For blocked shell calls, the error identifies the matching search command and it
 
 | Command | Action |
 |---------|--------|
-| `/raven` | Show status, routing, MCP health, version, model, timeout, and stats. |
+| `/raven` | Compact models, typed integration statuses, and context-savings totals. |
 | `/raven help` | Show command help. |
 | `/raven route` | Show and edit routed tools and keywords. |
-| `/raven mcp` | Open the interactive MCP manager on V2; show text status on V1. |
-| `/raven-mcps` | Open the interactive MCP manager on V2 (also available in the command palette). |
+| `/raven-integrations` | Open the unified integration manager on V2 (also in the command palette). |
+| `/raven integrations` | Open the integration manager on V2; show compact text status on V1. |
+| `/raven integrations refresh [id]` | Check MCP connections and CLI executable availability; use `mcp:name` or `cli:name` to disambiguate. |
+| `/raven mcp` | Open the unified manager on V2; show MCP-specific text status on V1. |
 | `/raven mcp auth <server>` | Display a browser sign-in URL for a remote on-demand MCP. |
 | `/raven mcp logout <server>` | Cancel sign-in, clear saved OAuth credentials, and close cached connections. |
 | `/raven mcp refresh [server]` | Recheck MCP health and regenerate metadata. |

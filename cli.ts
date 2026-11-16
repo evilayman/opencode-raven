@@ -1,5 +1,6 @@
 import { z } from "zod"
-import { resolve } from "node:path"
+import { delimiter, extname, isAbsolute, resolve } from "node:path"
+import { accessSync, constants, statSync } from "node:fs"
 import { spawn } from "node:child_process"
 
 const text = z.string().refine((value) => !value.includes("\0"), "NUL bytes are not supported")
@@ -46,6 +47,37 @@ export function prepareCli(definition: CliDefinition, args: string[], directory:
     command: [...command, ...args],
     cwd: resolve(directory, expand(cwd ?? definition.cwd ?? ".")),
     env: { ...process.env, ...Object.fromEntries(Object.entries(definition.environment ?? {}).map(([key, value]) => [key, expand(value)])) },
+  }
+}
+
+// Availability is a filesystem check, never a help/version probe or execution.
+export function inspectCli(definition: CliDefinition, directory: string): { executable?: string; cwd?: string; error?: string } {
+  try {
+    const invocation = prepareCli(definition, [], directory)
+    if (!statSync(invocation.cwd).isDirectory()) return { error: "Working directory is not a directory" }
+    const command = invocation.command[0]
+    const hasPath = isAbsolute(command) || /[\\/]/.test(command)
+    const env = (name: string) => Object.entries(invocation.env).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1]
+    const paths = hasPath ? [resolve(invocation.cwd, command)]
+      : (env("PATH") ?? "").split(delimiter).filter(Boolean).map((path) => resolve(invocation.cwd, path.replace(/^"|"$/g, ""), command))
+    // Batch/PowerShell scripts cannot run under Raven's shell:false executor.
+    const extensions = process.platform === "win32" && !extname(command) ? ["", ".exe", ".com"] : [""]
+    for (const path of paths) {
+      for (const extension of extensions) {
+        const candidate = path + extension
+        if (process.platform === "win32" && ![".exe", ".com"].includes(extname(candidate).toLowerCase())) continue
+        try {
+          if (!statSync(candidate).isFile()) continue
+          accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK)
+          return { executable: candidate, cwd: invocation.cwd }
+        } catch { /* Try the next PATH candidate. */ }
+      }
+    }
+    return { cwd: invocation.cwd, error: "Executable not found or not directly runnable; scripts need an explicit interpreter" }
+  } catch (error) {
+    // Do not echo expanded command arguments or environment values.
+    return { error: error instanceof Error && error.message.startsWith("Missing environment variable ")
+      ? error.message : "Working directory or CLI configuration is unavailable" }
   }
 }
 

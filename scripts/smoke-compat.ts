@@ -5,7 +5,7 @@ import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
 import { OpenCode } from "@opencode/client"
-import { RavenRpc } from "../rpc"
+import { RavenRpc, integrationRefreshToast } from "../rpc"
 
 const host = Bun.argv[2]
 if (host !== "v1" && host !== "v2") throw new Error("Usage: bun scripts/smoke-compat.ts v1|v2 [executable]")
@@ -18,9 +18,22 @@ const workspace = join(home, "workspace")
 const configDir = join(home, ".config", "opencode")
 mkdirSync(workspace, { recursive: true })
 mkdirSync(join(configDir, "opencode-raven"), { recursive: true })
+const failedMcp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("Unavailable", { status: 503 }) })
 writeFileSync(join(configDir, "opencode-raven", "raven-config.json"), JSON.stringify({
   raven_seek: { model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval" },
-  raven_act: { model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval", onDemandMcpServers: {} },
+  raven_act: {
+    model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval",
+    onDemandMcpServers: {
+      disabledLocal: { type: "local", command: [process.execPath], enabled: false },
+      failedRemote: { type: "remote", url: `http://127.0.0.1:${failedMcp.port}/mcp`, oauth: false, timeout: 1000 },
+      failedLocal: { type: "local", command: [process.execPath, "-e", "process.exit(7)"], timeout: 1000 },
+    },
+    onDemandClis: {
+      available: { command: [process.execPath] },
+      missing: { command: ["raven-missing-smoke-executable-9274"] },
+      disabled: { command: ["also-missing"], enabled: false },
+    },
+  },
 }))
 const plugin = pathToFileURL(resolve(import.meta.dirname!, "..", ...(host === "v1" ? ["index.ts"] : []))).href
 const plugins = [plugin]
@@ -101,6 +114,21 @@ try {
     await client.session.command({ sessionID: session.id, name: "raven", text: "help" }, options)
     const result = await client.rpc(RavenRpc).command({ arguments: "help" }, { ...options, location: { directory: workspace } })
     if (!result.text.includes("/raven seek model")) throw new Error(`Native Raven RPC returned no help: ${JSON.stringify(result)}`)
+    const refreshed = await client.rpc(RavenRpc).refreshIntegrations({}, { ...options, location: { directory: workspace } })
+    const integrations = await client.rpc(RavenRpc).listIntegrations({}, { ...options, location: { directory: workspace } })
+    for (const value of [integrations, refreshed]) {
+      if (value.integrations.find((item) => item.id === "cli:available")?.status !== "available"
+        || value.integrations.find((item) => item.id === "cli:missing")?.status !== "failed"
+        || value.integrations.find((item) => item.id === "mcp:failedRemote")?.status !== "failed"
+        || value.integrations.find((item) => item.id === "mcp:failedLocal")?.status !== "failed"
+        || value.integrations.find((item) => item.id === "mcp:disabledLocal")?.status !== "disabled") {
+        throw new Error(`Native integration status mismatch: ${JSON.stringify(value)}`)
+      }
+    }
+    const warning = integrationRefreshToast(refreshed)
+    if (warning.variant !== "warning" || !warning.message.includes("[MCP · HTTP] failedRemote")
+      || !warning.message.includes("[MCP · STDIO] failedLocal") || !warning.message.includes("[CLI] missing")
+      || warning.message.includes("available")) throw new Error(`Native integration failure summary mismatch: ${warning.message}`)
     const context = await client.session.context({ sessionID: session.id }, options)
     const inbox = await client.session.inbox.list({ sessionID: session.id }, options)
     if (context.length || inbox.length) throw new Error("/raven help unexpectedly queued session input or scheduled model generation")
@@ -148,5 +176,6 @@ try {
   throw error
 } finally {
   await stopHost()
+  failedMcp.stop(true)
   rmSync(home, { recursive: true, force: true })
 }

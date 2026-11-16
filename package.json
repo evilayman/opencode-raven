@@ -14,7 +14,7 @@
     "raven-core.ts",
     "cli.ts",
     "oauth.ts",
-    "mcp-ui.ts",
+    "integrations-ui.ts",
     "v2.ts",
     "background.ts",
     "tui.ts",
