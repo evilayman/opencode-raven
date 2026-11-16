@@ -16,11 +16,12 @@
     </td>
     <td valign="top">
       <h2>Why Raven</h2>
-      <p>Raven delegates search and on-demand MCP retrieval to separate focused agents, then returns compact evidence to the calling session.</p>
+      <p>Raven delegates local search to Raven Search and app/tool work to Raven Act, returning compact results to the calling session.</p>
       <ul>
         <li>Routes local search and filesystem discovery through lightweight <code>raven_seek</code>.</li>
-        <li>Uses a separately configurable model for MCP-first online research, with built-in web fallbacks, through <code>raven_mcp</code>.</li>
+        <li>Uses one configurable <code>raven_act</code> operator for MCP-first online research and requested app, website, and tool operations.</li>
         <li>Keeps optional on-demand MCP schemas out of the main model's tool list.</li>
+        <li>Combines MCP and registered CLI bridges in the same operator session, with Raven's existing auto-approval.</li>
         <li>Preconfigures Context7, Exa, and Grep.app endpoints.</li>
         <li>Tracks estimated main-session context avoided by delegation.</li>
       </ul>
@@ -30,7 +31,7 @@
 
 ## Install
 
-**Raven 2.3 supports OpenCode V2 (2.0.26+).** OpenCode V1 (1.18.29+) remains supported in the same package—no separate plugin is needed.
+**Raven 2.4.0 supports OpenCode V2 (2.0.26+).** OpenCode V1 (1.18.29+) remains supported in the same package—no separate plugin is needed.
 
 ### OpenCode V2
 
@@ -76,6 +77,22 @@ The v1 minimum is 1.18.29 because earlier versions cannot load the shared object
 
 For local development, v1 can load `file:///path/to/opencode-raven/index.ts`; v2 requires the package directory, `file:///path/to/opencode-raven`.
 
+### Upgrading from 2.3.x
+
+Existing `raven_mcp` and `raven_cli` settings automatically migrate into
+`raven_act`, including MCP definitions, CLI registrations, and custom instructions.
+Update custom prompts and integrations to call `raven_act` instead of `raven_mcp`
+or `raven_cli`. Start a new Act session; old agent sessions remain inspectable but
+cannot be resumed under the new agent.
+
+On V2, **Act now defaults to foreground execution**; set `background: true` when
+you want a background task. `raven_seek` remains background-first. The published
+`/raven mcp model|effort|timeout` commands still work as aliases for `/raven act`
+settings.
+
+See [On-Demand CLIs](#on-demand-clis) for registration examples and
+[Configuration](#configuration) for migration precedence and shared settings.
+
 ### First-Time Setup
 
 On first start, Raven checks OpenCode's connected provider catalog and automatically selects an available zero-cost, tool-capable model from the `opencode` provider for both Raven agents. Free-model availability is controlled by the provider and can change.
@@ -86,10 +103,10 @@ If no suitable free model is available, Raven shows a setup warning and leaves s
 
 ```txt
 /raven seek model <provider/model>
-/raven mcp model <provider/model>
+/raven act model <provider/model>
 ```
 
-Restart OpenCode afterward. You can retry free-model detection at any time with `/raven seek model auto` and `/raven mcp model auto`.
+Reload OpenCode afterward. You can retry free-model detection at any time with `/raven seek model auto` and `/raven act model auto`.
 
 ## Example
 
@@ -104,19 +121,19 @@ In this run, Raven handled the search-heavy web research in a child session and 
 **Raven works automatically.** Ask OpenCode for what you need as usual. You do not need to mention Raven, run a command, or manually call a delegation tool.
 
 1. Your agent attempts to use a routed search, fetch, shell-discovery, or MCP tool.
-2. Raven blocks the noisy direct call and gives the agent the exact retry: `raven_seek` for local searches, or `raven_mcp` for web search, URL fetching, and global MCP tools.
+2. Raven blocks the noisy direct call and gives the agent the exact retry: `raven_seek` for local searches, or `raven_act` for web research and global MCP tools. Registered CLI work also uses `raven_act`.
 3. The selected Raven agent creates a session attached directly to the root session or resumes one for a related follow-up.
-4. Raven performs retrieval work and returns compact evidence to the calling agent, which retains analysis and judgment.
+4. Raven retrieves evidence or performs the explicitly requested operation, returning compact results to the calling agent, which retains planning and judgment.
 
 The main model receives Raven's final answer instead of its raw tool output. Each result includes a Raven session ID that the main agent can pass back for a context-aware follow-up. Child sessions remain available in OpenCode's session/subagent view for inspection.
 
-### Background Retrieval (OpenCode V2)
+### Background Tasks (OpenCode V2)
 
-On V2, `raven_seek` and `raven_mcp` **run in the background by default**. The initial response contains a child-session handle, not the findings. The calling agent can continue independent work; Raven delivers compact findings or a failure notice to that same calling session when retrieval finishes, including when the caller is itself a child session.
+On V2, `raven_seek` **runs in the background by default**. `raven_act` defaults to **foreground** execution and accepts `background: true` for explicitly requested background work. A background response contains a child-session handle, not the result. Raven delivers compact results or a failure notice to that same calling session, including when the caller is itself a child session.
 
 ```text
-raven_mcp(query="Find the current API documentation")
-raven_mcp(query="Retrieve library examples", background=true)
+raven_act(query="Find the current API documentation")
+raven_act(query="Retrieve library examples", background=true)
 raven_seek(query="Find the definition needed for my next step", background=false)
 ```
 
@@ -124,30 +141,31 @@ Use `background: false` when the next step depends on the answer. Do not poll, r
 
 Background retrieval keeps Raven's configured timeouts, permissions, continuation checks, and context estimates. Returning the handle ends the calling tool, not the child retrieval. To stop it, open the returned child session and interrupt it. Deleting the calling session also cancels its pending retrievals.
 
-Results are delivered through V2's durable synthetic inbox input, which can resume the calling agent and therefore cause another model turn. Undelivered results are retained in plugin storage and retried when that location's plugin next loads. A plugin/service restart cancels running work; Raven reports the interruption instead of automatically replaying searches or potentially stateful MCP calls. V1 keeps its existing foreground behavior.
+Results are delivered through V2's durable synthetic inbox input, which can resume the calling agent and therefore cause another model turn. Undelivered results are retained in plugin storage and retried when that location's plugin next loads. A plugin/service restart cancels running work; Raven reports the interruption instead of automatically replaying searches or potentially stateful MCP/CLI calls. V1 keeps foreground behavior. Never replay an uncertain operation merely because its result was interrupted or delivered late.
 
 Raven manages its own background child sessions using the public plugin APIs. This does not add native Ctrl+B background support to Raven's custom tools.
 
 For direct search control, mention `@Raven` in any chat. This sends the request to the search agent, but it is optional and not required for automatic routing.
 
-Under the hood, Raven registers two public delegation tools and one internal bridge:
+Under the hood, Raven registers two public delegation tools and two internal bridges:
 
 | Tool | Purpose |
 |------|---------|
 | `raven_seek` | Creates or resumes a lightweight Raven Search session for local file search, discovery, and command-output inspection. |
-| `raven_mcp` | Creates or resumes an MCP-first online research session using global or on-demand MCPs, built-in web fallbacks, and local retrieval tools when needed for context. |
-| `raven_mcp_bridge` | Internal bridge used only by the Raven MCP agent. |
+| `raven_act` | Creates or resumes one operator session for online research and explicitly requested app/service/tool operations through MCP and registered CLIs. |
+| `raven_mcp_bridge` | Internal MCP adapter used only by Raven Act (remote HTTP/SSE or local stdio). |
+| `raven_cli_bridge` | Internal CLI discovery, help, and execution adapter used only by Raven Act. |
 
-On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_mcp` delegation tools instead of prompting on every call. Inside either Raven agent, any permission check that would otherwise ask is automatically approved, including skill loading and MCP calls. Explicit deny rules still apply. These execution-time approvals do not add a blanket agent permission or change the main agent's tool permissions, model request, or access restrictions on the internal MCP bridge.
+On OpenCode V2, Raven auto-approves permission checks for the public `raven_seek` and `raven_act` delegation tools instead of prompting on every call. Inside either Raven agent, any permission check that would otherwise ask is automatically approved, including skill loading, MCP calls, and CLI execution. Explicit deny rules still apply. These execution-time approvals do not add a blanket agent permission or change the main agent's permissions or access restrictions on the internal bridges. State-changing operations can execute without a confirmation prompt.
 
 For a related follow-up, the main agent can reuse the ID returned by the earlier call:
 
 ```text
-raven_mcp(query="Research the available options")
-raven_mcp(query="Compare the first two in more detail", sessionId="ses_...")
+raven_act(query="Inspect the scene through the configured Unity MCP")
+raven_act(query="Use the registered Unity CLI to perform the requested build", sessionId="ses_...")
 ```
 
-Raven accepts a resumed session only when it belongs to the same root session tree and matching Raven agent. Do not pass session IDs between `raven_seek` and `raven_mcp`. Delegated sessions attach directly to the root so they remain visible in the main session's child switcher even when delegation starts inside another child.
+Raven accepts a resumed session only when it belongs to the same root session tree and matching Raven agent. MCP and CLI steps share the same `raven_act` history; do not pass IDs between `raven_seek` and `raven_act`. Delegated sessions attach directly to the root so they remain visible in the main session's child switcher even when delegation starts inside another child.
 
 OpenCode's built-in tools already exist; Raven routes selected calls instead of replacing those tools. Global MCPs also remain globally registered, so their schemas still enter the main session even when Raven routes their calls.
 
@@ -178,15 +196,23 @@ Manual edits require an OpenCode restart. Route and timeout commands apply immed
 | `raven_seek.excludeAgents` | `[]` | Agents allowed to bypass search routing. |
 | `raven_seek.excludeTools` | `[]` | Exact tools never routed through Raven Search. |
 | `raven_seek.timeout` | `600` | Search delegation timeout in seconds. |
-| `raven_mcp.model` | Auto-detected free OpenCode model, otherwise unset | MCP-agent model. Manual values are preserved. |
-| `raven_mcp.autoSelectedModel` | Managed by Raven | Tracks whether the MCP model can be safely refreshed automatically. |
-| `raven_mcp.reasoning_effort` | `low` | MCP-agent reasoning option. |
-| `raven_mcp.instructions` | `""` | Extra MCP-agent instructions. |
-| `raven_mcp.timeout` | `600` | MCP delegation and fallback connection timeout in seconds. |
-| `raven_mcp.descriptionDetail` | `"full"` | Full or minimized generated MCP guidance. |
-| `raven_mcp.onDemandMcpServers` | Context7, Exa, Grep.app | Remote HTTP/SSE or local stdio MCP definitions. |
+| `raven_act.model` | Auto-detected free OpenCode model, otherwise unset | Shared operator model for MCP and CLI. Manual values are preserved. |
+| `raven_act.autoSelectedModel` | Managed by Raven | Tracks whether the operator model can be safely refreshed automatically. |
+| `raven_act.reasoning_effort` | `low` | Operator reasoning option. |
+| `raven_act.instructions` | `""` | Extra operator instructions shared across both bridges. |
+| `raven_act.timeout` | `600` | Shared delegation and fallback MCP connection timeout in seconds. |
+| `raven_act.descriptionDetail` | `"full"` | Full or minimized generated MCP guidance. |
+| `raven_act.onDemandMcpServers` | Context7, Exa, Grep.app | Remote HTTP/SSE or local stdio MCP definitions. |
+| `raven_act.onDemandClis` | `{}` | Named external CLI definitions; none installed or probed automatically. |
 
-Existing flat configuration is migrated automatically on startup without a version field. Shared model, reasoning effort, instructions, and timeout values seed both sections; routing and MCP fields move to their corresponding sections.
+Existing flat configuration and the former `raven_mcp`/`raven_cli` sections migrate
+automatically into `raven_seek` and `raven_act`. The operator keeps MCP definitions,
+CLI registrations, and both sets of custom instructions. Explicit `raven_act`
+values take precedence; otherwise former MCP agent settings win over former CLI
+agent settings because there is now one model/timeout. Legacy `/raven mcp
+model|effort|timeout` commands remain aliases for the shared Act settings.
+The old `raven_mcp` and `raven_cli` delegation tools are replaced by `raven_act`;
+old agent sessions cannot be resumed as Act sessions. Start a new Act task.
 
 ## On-Demand MCPs
 
@@ -200,13 +226,13 @@ Fresh installs include:
 
 Provider access policies can change. `/raven mcp` shows the result of Raven's current startup probe.
 
-Merge changes into the existing `raven_mcp.onDemandMcpServers` object; replacing it removes omitted defaults. Header and environment values support `{env:VARIABLE}` placeholders.
+Merge changes into the existing `raven_act.onDemandMcpServers` object; replacing it removes omitted defaults. Header and environment values support `{env:VARIABLE}` placeholders.
 
 Custom remote MCP or keyed endpoint:
 
 ```jsonc
 {
-  "raven_mcp": {
+  "raven_act": {
     "onDemandMcpServers": {
       "myDocs": {
         "type": "remote",
@@ -222,7 +248,7 @@ Custom local stdio MCP:
 
 ```jsonc
 {
-  "raven_mcp": {
+  "raven_act": {
     "onDemandMcpServers": {
       "myLocal": {
         "type": "local",
@@ -270,7 +296,7 @@ and globally registered servers are unchanged. OpenCode V1 keeps the text-based
 
 Remote on-demand MCPs support OAuth directly through Raven; they do not need to
 be registered as global OpenCode MCPs. For example, merge Basecamp into the existing
-`raven_mcp.onDemandMcpServers` configuration:
+`raven_act.onDemandMcpServers` configuration:
 
 ```jsonc
 {
@@ -330,13 +356,116 @@ credentials, and close Raven's cached connections. Logout does not revoke the
 provider's grant; revoke it in the provider's account settings if needed. Avoid
 configuring the same server globally and on-demand, which exposes duplicate tools.
 
+## On-Demand CLIs
+
+Register trusted tools in `raven_act.onDemandClis` in the existing
+`~/.config/opencode/opencode-raven/raven-config.json`. CLI and MCP definitions share
+one operator configuration. A CLI needs no MCP server, bespoke integration,
+installation, executable lookup, or startup help probe.
+
+```json
+{
+  "raven_act": {
+    "onDemandClis": {
+      "unity": {
+        "command": ["C:\\Tools\\UnityCLI\\unity-cli.exe"],
+        "description": "Unity command-line automation",
+        "instructions": "Use the installed tool's help to discover supported operations.",
+        "helpArgs": ["--help"],
+        "timeout": 300000
+      },
+      "blender": {
+        "command": ["C:\\Program Files\\Blender Foundation\\Blender\\blender.exe"],
+        "description": "Blender rendering and automation",
+        "helpArgs": ["--help"],
+        "timeout": 300000,
+        "maxOutputBytes": 65536
+      }
+    }
+  }
+}
+```
+
+These are placeholder paths, not bundled integrations. Replace them with your
+installed executables and supported help arguments. Any external CLI can be
+registered, not just Unity or Blender. CLI names use letters, digits, `_`, or `-`.
+
+| Definition field | Meaning |
+|------------------|---------|
+| `command` | Required argv prefix: executable followed by fixed arguments. Not a shell string. |
+| `description` | Short capability summary shown to the calling model. |
+| `instructions` | Optional detailed usage notes fetched by Act's CLI `describe` operation. |
+| `enabled` | Defaults to `true`; `false` retains the definition without allowing calls. |
+| `environment` | Extra environment values; inherits the service environment and supports `{env:NAME}`. Values are omitted from discovery output. |
+| `cwd` | Default working directory, relative to the session directory or absolute. Supports `{env:NAME}`. |
+| `helpArgs` | Defaults to `["--help"]`; replaces call arguments for `help`. `[]` is allowed. |
+| `timeout` | Per-process timeout in **milliseconds**, default `120000`. |
+| `maxOutputBytes` | Combined stdout/stderr cap, default `65536`, range `1024`–`10485760`. Excess output is drained and discarded, with truncation reported. |
+
+Executable/fixed command arguments support `{env:NAME}` too. Call arguments are
+literal strings: spaces stay inside each argument; pipes, wildcards, redirections,
+and shell substitutions are not interpreted. For scripts, register the interpreter
+explicitly, for example `["bun", "C:\\Tools\\my-cli.ts"]`. On Windows use an
+executable/interpreter, not a bare `.cmd`, `.bat`, or PowerShell script.
+
+You can register and manage tools without reloading OpenCode:
+
+```text
+/raven cli add blender {"command":["blender"],"description":"Blender rendering and automation"}
+/raven cli
+/raven cli disable blender
+/raven cli enable blender
+/raven cli remove blender
+```
+
+`add` refuses to overwrite an existing name. After editing the JSON yourself,
+run `/raven cli reload` to apply registry and timeout changes immediately.
+Disabling or removing a definition blocks subsequent calls; it does not cancel
+an already-running process. Interrupt its Act child session to stop that work.
+Invalid definitions fail closed without overwriting the configuration or
+disabling working MCPs. Use `/raven act model <provider/model>` for the shared
+operator model and `/raven act timeout <seconds>` for the overall task timeout.
+Each CLI definition's `timeout` remains a per-process limit in milliseconds.
+
+Ask the main agent for a specific operation, including input/output paths and
+what may change. It delegates through:
+
+```text
+raven_act(query="Use registered blender in D:\\Art to render scene.blend to D:\\Art\\renders. Only create render outputs; do not overwrite the scene.")
+```
+
+Only the `raven-act` agent can use `raven_cli_bridge`. Its operations are
+`list_tools`, `describe`, `help`, and `run`. Listing/description do not launch
+processes. Help and execution use the registered executable, permission checks,
+cancellation, a timeout, and bounded stdout/stderr with exit status. The caller
+receives a compact summary and a resumable Act session ID, usable across MCP and
+CLI follow-ups. Search session IDs remain separate.
+
+**Execution keeps Raven's auto-approval.** Otherwise-asking checks inside Raven
+Act are approved on V2; explicit denials still block execution. V1 and newer V2
+hosts check the resolved executable/argv/cwd immediately before spawning. Older V2
+hosts without `permission.assert` gate every bridge call (including discovery)
+under `raven_cli_execute` instead. Permission rules may explicitly allow or deny
+this action.
+
+Registered CLIs are trusted local programs, **not a sandbox**: their arguments can
+write files, execute scripts, reach the network, or change external state. Do not
+register shell/interpreter wrappers unless you intend that access. Never put
+secrets in descriptions, instructions, command arguments, or logs. Environment
+values are not exposed by discovery, but the program itself may print them.
+Cancellation, timeout, and plugin unload attempt to stop the process tree; they
+cannot undo changes or stop work already submitted to external services. Raven
+waits up to five seconds for termination after a stop request and reports
+`terminationUnconfirmed` if cleanup cannot be confirmed. It never automatically
+replays a failed or interrupted CLI operation.
+
 ## Routing
 
 Default routed tools are `grep`, `glob`, `webfetch`, `fetch`, `websearch`, and search-like `bash` commands. On OpenCode 2, Raven also recognizes the native `shell` tool; `bash` and `shell` are routing aliases, so existing routing settings continue to work. Exact `excludeTools` entries use the host's actual tool name.
 
-Local search tools route to `raven_seek`; `webfetch`, `fetch`, `websearch`, and recognized global MCP tools route to `raven_mcp`. Each route uses its target agent's configured model and recovery instructions.
+Local search tools route to `raven_seek`; `webfetch`, `fetch`, `websearch`, and recognized global MCP tools route to `raven_act`. Each route uses its target agent's configured model and recovery instructions.
 
-Raven MCP's prompt and capability guidance require MCP-first retrieval: honor a suitable caller-named MCP; otherwise use Context7 for supported library/API documentation, Exa for web research, official-site discovery and page fetching (including documentation outside Context7 coverage), and Grep.app for public code examples. Exact URLs also use a suitable MCP fetch capability first. Built-in web tools remain available only as a reported fallback when no suitable MCP is available, retrieval fails, or evidence is insufficient. This is an agent instruction, not a runtime tool lock; local reads and searches for context or saved output are unaffected.
+Raven Act's prompt and capability guidance require MCP-first **online retrieval**: honor a suitable caller-named MCP; otherwise use Context7 for supported library/API documentation, Exa for web research, official-site discovery and page fetching (including documentation outside Context7 coverage), and Grep.app for public code examples. Exact URLs also use a suitable MCP fetch capability first. Built-in web tools remain available only as a reported fallback when no suitable MCP is available, retrieval fails, or evidence is insufficient. This is an agent instruction, not a runtime tool lock; local context retrieval and app/CLI operations do not require unrelated web research.
 
 Global MCPs are automatically routed when their OpenCode tool names use the normal `<server>_<tool>` prefix. Use a keyword for suffix-style names:
 
@@ -373,24 +502,30 @@ For blocked shell calls, the error identifies the matching search command and it
 | `/raven seek model <provider/model>\|auto` | Change or auto-detect the search model; restart afterward. |
 | `/raven seek effort <value>` | Change search reasoning effort; restart afterward. |
 | `/raven seek timeout <seconds>` | Change the search delegation timeout. |
-| `/raven mcp model <provider/model>\|auto` | Change or auto-detect the MCP model; restart afterward. |
-| `/raven mcp effort <value>` | Change MCP reasoning effort; restart afterward. |
-| `/raven mcp timeout <seconds>` | Change the MCP delegation timeout. |
+| `/raven act` | Show the unified operator and its MCP/CLI capabilities. |
+| `/raven act model <provider/model>\|auto` | Change or auto-detect the shared operator model; reload OpenCode afterward. |
+| `/raven act effort <value>` | Change operator reasoning effort; reload OpenCode afterward. |
+| `/raven act timeout <seconds>` | Change the shared MCP/CLI delegation timeout. |
+| `/raven cli` | Show CLI status and registration help. |
+| `/raven cli add <name> <JSON>` | Register a trusted executable/argv prefix without launching it. |
+| `/raven cli enable\|disable\|remove <name>` | Manage registered CLIs immediately. |
+| `/raven cli reload` | Validate and reload manually edited CLI definitions/timeouts. |
 | `/raven stats` | Show estimated context avoided. |
 | `/raven update` | Check npm, clear Raven's OpenCode package cache when needed, and show restart instructions. |
 
 ## Security And Privacy
 
-Raven is optimized for autonomous retrieval:
+Raven is optimized for autonomous retrieval and explicitly requested operations:
 
 - Raven Search has read, search, unrestricted shell, external-directory, and globally configured MCP access without normal permission prompts.
-- Raven MCP has the same retrieval access as Raven Search, plus the internal on-demand MCP bridge. Its MCP-first instructions retain built-in web tools for fallback and local file access for research context; these instructions are not access restrictions.
+- Raven Act has the same retrieval access as Raven Search, plus the internal MCP/CLI bridges. It can perform requested state-changing operations without normal confirmation prompts. Its MCP-first research instructions are not access restrictions.
 - Both agents deny edit tools and nested delegation, but shell access is not a read-only sandbox and can modify the system. MCP tools may also modify external systems; V2 auto-approval trusts the Raven agents rather than enforcing read-only execution.
 - Queries are sent to Raven's configured model provider.
 - Remote MCP requests are sent to their services; local MCP entries launch local commands and inherit environment values.
 - Startup performs an npm update check and probes enabled on-demand MCPs.
+- Registered CLIs inherit the service environment and can modify files or external state. Registration and output limits are not a sandbox.
 
-Review `Raven.md`, `RavenMcp.md`, and your MCP commands before using Raven in sensitive environments.
+Review `Raven.md`, `RavenAct.md`, and your MCP/CLI commands before using Raven in sensitive environments.
 
 ## Context Estimates
 
@@ -398,9 +533,9 @@ Review `Raven.md`, `RavenMcp.md`, and your MCP commands before using Raven in se
 
 ## Troubleshooting
 
-- First-time model warning: select a model in OpenCode's model picker, run `/raven seek model <provider/model>` and `/raven mcp model <provider/model>`, then restart. Use `auto` as the model value to retry free-model detection.
+- First-time model warning: select a model in OpenCode's model picker, run `/raven seek model <provider/model>` and `/raven act model <provider/model>`, then reload OpenCode. Use `auto` as the model value to retry free-model detection.
 - Search provider or quota failure: run `/raven seek model <provider/model>`, then restart OpenCode.
-- MCP-agent provider or quota failure: run `/raven mcp model <provider/model>`, then restart OpenCode.
+- Operator provider or quota failure: run `/raven act model <provider/model>`, then reload OpenCode.
 - MCP failure: run `/raven mcp`, then `/raven mcp refresh <server>` after correcting its URL, command, environment, or credentials.
 - OAuth required or expired: run `/raven mcp auth <server>` and approve access in the browser. If its callback port is busy, configure a free `oauth.callbackPort`. Use `/raven mcp logout <server>` to clear credentials and cancel an unfinished sign-in.
 - Stale plugin version: run `/raven update`, restart OpenCode, and follow the cache-clearing instructions it prints if needed.

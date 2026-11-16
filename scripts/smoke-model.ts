@@ -36,7 +36,7 @@ export default {
           { action: "*", resource: "*", effect: "allow" },
           // The native smoke must finish without an interactive approval.
           { action: "raven_seek", resource: "*", effect: "ask" },
-          { action: "raven_mcp", resource: "*", effect: "ask" },
+          { action: "raven_act", resource: "*", effect: "ask" },
         ]
       })
     }))

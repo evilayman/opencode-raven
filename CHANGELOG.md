@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.4.0
+
+### Added
+- General-purpose on-demand CLI registry, with per-tool executable/argv prefixes, descriptions, detailed instructions, environment, working directory, help arguments, timeouts, output caps, and enable/disable settings.
+- Unified `raven_act` operator for MCP and registered CLI work, sharing a model, task session/history, and Raven's existing otherwise-asking auto-approval while respecting explicit denials.
+- Modular private MCP/CLI bridges, lazy CLI discovery/help, shell-free argv execution, bounded stdout/stderr, process-tree cancellation, and no automatic replay on uncertain outcomes.
+- `/raven act` shared model/effort/timeout settings and `/raven cli` registration, enable/disable/remove, and reload commands; Unity CLI and Blender registration examples.
+- Automatic migration of former `raven_mcp`/`raven_cli` settings into `raven_act`, retaining both transport registries and custom instructions. Published MCP model commands remain aliases.
+
+### Changed
+- `raven_act` replaces `raven_mcp` (and the unreleased `raven_cli` delegator). Act runs in the foreground by default on V2, with explicit `background: true` support; Search remains background-first.
+- Old MCP/CLI agent sessions remain available for inspection but cannot be resumed as Act sessions; start a new `raven_act` task after upgrading.
+
+### Fixed
+- Native compatibility smoke checks now terminate their isolated Windows server process tree during cleanup, preventing a successful run from hanging on inherited output handles.
+
 ## 2.3.8
 
 ### Added

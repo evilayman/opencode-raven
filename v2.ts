@@ -64,6 +64,15 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
   let startupTimer: ReturnType<typeof setTimeout> | undefined
   let eventPump: Promise<void> | undefined
   let disposed = false
+  // Older V2 hosts gate the whole bridge tool; newer hosts can additionally
+  // authorize the resolved executable/argv/cwd immediately before spawning.
+  const permissionApi = ctx.permission as typeof ctx.permission & {
+    assert?: (input: {
+      sessionID: string; agent: string;
+      source: { type: "tool"; messageID: string; id: string };
+      action: string; resources: string[]; save: string[];
+    }) => Promise<void>
+  }
 
   const requestOptions = (call: Call): RequestOptions => ({ signal: call.signal ? AbortSignal.any([call.signal, controller.signal]) : controller.signal })
 
@@ -217,8 +226,8 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     // Approve Raven's asks at execution time; explicit denials remain final.
     registrations.push(await ctx.permission.hook("evaluate", (event) => {
       if (event.effect !== "ask") return
-      const delegation = event.action === "raven_seek" || event.action === "raven_mcp"
-      if (delegation || event.agent === "raven" || event.agent === "raven-mcp") {
+      const delegation = event.action === "raven_seek" || event.action === "raven_act"
+      if (delegation || event.agent === "raven" || event.agent === "raven-act") {
         event.effect = "allow"
       }
     }))
@@ -246,14 +255,18 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     const tools: NonNullable<Hooks["tool"]> = raven.tool
     registrations.push(await ctx.tool.transform((editor) => {
       for (const [name, definition] of Object.entries(tools)) {
-        const delegation = name === "raven_seek" || name === "raven_mcp"
+        const delegation = name === "raven_seek" || name === "raven_act"
+        const backgroundDefault = name === "raven_seek"
+        const backgroundDescription = backgroundDefault
+          ? "Defaults to true. Return immediately and deliver compact findings to this calling session on completion. Set false to wait when the next step depends on these findings."
+          : "Defaults to false (foreground). Set true to run this task in the background and deliver its result automatically. Never repeat a pending or uncertain operation."
         const schema = z.object({ ...definition.args, ...(delegation ? {
-          background: z.boolean().optional().describe("Defaults to true. Return immediately and deliver compact findings to this calling session on completion. Set false to wait when the next step depends on these findings."),
+          background: z.boolean().optional().describe(backgroundDescription),
         } : {}) })
         editor.add({
-          name, description: definition.description + (delegation ? " Runs in the background by default on V2; completion findings arrive automatically. Use background: false to wait for dependent evidence." : ""),
+          name, description: definition.description + (delegation ? ` ${backgroundDescription}` : ""),
           input: z.toJSONSchema(schema),
-          options: { permission: name, codemode: false },
+          options: { permission: name === "raven_cli_bridge" && !permissionApi.assert ? "raven_cli_execute" : name, codemode: false },
           async execute(input, context) {
             await raven["chat.message"]({ sessionID: context.sessionID, agent: context.agent }, {})
             await raven["tool.execute.before"]({ tool: name, sessionID: context.sessionID, callID: context.id }, { args: input })
@@ -267,11 +280,24 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
                 metadata = { ...metadata, ...update.metadata, ...(update.title ? { title: update.title } : {}) }
                 progress = progress.then(() => context.progress(metadata)).catch(() => {})
               },
-              async ask() { throw new Error("Raven tools do not request additional permissions") },
+              async ask(request) {
+                if (request.permission !== "raven_cli_execute") throw new Error("Unsupported Raven permission request")
+                if (permissionApi.assert) {
+                  await permissionApi.assert({
+                    sessionID: context.sessionID, agent: context.agent,
+                    source: { type: "tool", messageID: context.messageID, id: context.id },
+                    action: request.permission, resources: request.patterns, save: request.always,
+                  })
+                } else if (name !== "raven_cli_bridge") {
+                  throw new Error("This OpenCode host cannot authorize CLI execution")
+                }
+                // On older hosts, options.permission gated this bridge call
+                // before execute. Raven Act auto-approves asks, never denials.
+              },
             }
             const parsed: Record<string, any> = schema.parse(input)
             const execute = (toolContext: V1ToolContext) => definition.execute(parsed, toolContext)
-            const result = delegation && parsed.background !== false
+            const result = delegation && (parsed.background ?? backgroundDefault)
               ? await background.run(name, String(parsed.query), legacyContext, execute)
               : await execute(legacyContext)
             await progress
@@ -302,8 +328,8 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     registrations.push(await ctx.session.hook("context", async (event) => {
       await raven["chat.message"]({ sessionID: event.sessionID, agent: event.agent }, {})
       if (event.agent === "raven") return
-      event.system.push({ type: "text", text: event.agent === "raven-mcp" ? raven.mcpGuidance() : raven.guidance() })
-      if (event.agent !== "raven-mcp") event.system.push({ type: "text", text: "On OpenCode V2, raven_seek and raven_mcp run in the background by default. Their initial response is a session handle, not findings. Continue independent work while waiting for the automatic completion message. Do not poll or repeat pending retrievals, and do not finalize dependent conclusions without their findings. Set background: false if your next step requires the answer. Follow-ups must wait until the earlier request finishes." })
+      event.system.push({ type: "text", text: event.agent === "raven-act" ? raven.actGuidance() : raven.guidance() })
+      if (event.agent !== "raven-act") event.system.push({ type: "text", text: "On OpenCode V2, raven_seek runs in the background by default; raven_act runs in the foreground unless background: true is requested. A background response is a child-session handle, not a completed result. Continue independent work while waiting for automatic delivery. Do not poll, repeat pending work, or finalize dependent conclusions without the result. Wait for completion before reusing sessionId. Never automatically replay uncertain MCP/CLI operations." })
     }))
     registrations.push(await ctx.session.hook("retry", async (event) => {
       await raven.event({ event: {
@@ -312,7 +338,7 @@ export async function setupRaven(ctx: Context): Promise<Plugin.Cleanup> {
     }))
     registrations.push(await ctx.command.transform((editor) => {
       editor.add({
-        name: "raven", description: "Manage Raven routing, MCPs, models, timeouts, updates, and status",
+        name: "raven", description: "Manage Raven routing, MCPs, CLIs, models, timeouts, updates, and status",
         async execute({ sessionID, prompt }) {
           if (prompt.text.trim().toLowerCase() === "mcp") {
             await emitNotice({ kind: "mcp", sessionID, message: "Raven MCPs" })

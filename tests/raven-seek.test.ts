@@ -68,7 +68,7 @@ async function ravenSeek(client: any) {
   mkdirSync(ravenConfigDir, { recursive: true })
   writeFileSync(ravenConfigFile, JSON.stringify({
     raven_seek: { model: "provider/search" },
-    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+    raven_act: { model: "provider/mcp", onDemandMcpServers: {} },
   }))
   const hooks = await RavenPlugin(pluginInput(client))
   return (hooks.tool as any).raven_seek
@@ -78,10 +78,10 @@ async function ravenMcp(client: any) {
   mkdirSync(ravenConfigDir, { recursive: true })
   writeFileSync(ravenConfigFile, JSON.stringify({
     raven_seek: { model: "provider/search" },
-    raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+    raven_act: { model: "provider/mcp", onDemandMcpServers: {} },
   }))
   const hooks = await RavenPlugin(pluginInput(client))
-  return { hooks, mcp: (hooks.tool as any).raven_mcp }
+  return { hooks, mcp: (hooks.tool as any).raven_act }
 }
 
 describe("Raven configuration migration", () => {
@@ -109,7 +109,7 @@ describe("Raven configuration migration", () => {
     await hooks.event!({ event: { type: "test.ready" } } as any)
     const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
     expect(saved.raven_seek).toMatchObject({ model: "opencode/selected-free", autoSelectedModel: "opencode/selected-free" })
-    expect(saved.raven_mcp).toMatchObject({ model: "opencode/selected-free", autoSelectedModel: "opencode/selected-free" })
+    expect(saved.raven_act).toMatchObject({ model: "opencode/selected-free", autoSelectedModel: "opencode/selected-free" })
     await hooks.dispose?.()
 
     const restarted = await RavenPlugin(pluginInput({ provider: { list }, session: {} }))
@@ -117,7 +117,7 @@ describe("Raven configuration migration", () => {
     await restarted.config!(config)
     expect(config.agent.raven.model).toBe("opencode/selected-free")
     expect(config.agent.raven.disable).toBe(false)
-    expect(config.agent["raven-mcp"].model).toBe("opencode/selected-free")
+    expect(config.agent["raven-act"].model).toBe("opencode/selected-free")
     expect(list).toHaveBeenCalledTimes(1)
     await restarted.dispose?.()
   })
@@ -141,7 +141,7 @@ describe("Raven configuration migration", () => {
     await hooks.event!({ event: { type: "test.ready" } } as any)
     const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
     expect(saved.raven_seek.model).toBeUndefined()
-    expect(saved.raven_mcp.model).toBeUndefined()
+    expect(saved.raven_act.model).toBeUndefined()
 
     await (hooks as any)["tool.execute.before"](
       { tool: "grep", sessionID: "ses_parent", callID: "call_1" },
@@ -158,6 +158,7 @@ describe("Raven configuration migration", () => {
     writeFileSync(ravenConfigFile, JSON.stringify({
       raven_seek: { model: "opencode/deepseek-v4-flash-free" },
       raven_mcp: { model: "provider/manual", onDemandMcpServers: {} },
+      raven_cli: { instructions: "Keep existing CLI instructions.", onDemandClis: { sample: { command: ["sample"], enabled: false } } },
     }))
     const list = mock(async () => ({
       data: {
@@ -175,7 +176,7 @@ describe("Raven configuration migration", () => {
     const config: any = { mcp: {}, instructions: [] }
     await hooks.config!(config)
     expect(config.agent.raven.disable).toBe(true)
-    expect(config.agent["raven-mcp"].model).toBe("provider/manual")
+    expect(config.agent["raven-act"].model).toBe("provider/manual")
     await (hooks as any)["tool.execute.before"](
       { tool: "grep", sessionID: "ses_parent", callID: "call_local" },
       { args: { pattern: "direct while Search is unconfigured" } },
@@ -183,13 +184,17 @@ describe("Raven configuration migration", () => {
     await expect((hooks as any)["tool.execute.before"](
       { tool: "websearch", sessionID: "ses_parent", callID: "call_online" },
       { args: { query: "online while Search is unconfigured" } },
-    )).rejects.toThrow("raven_mcp")
+    )).rejects.toThrow("raven_act")
     await hooks.event!({ event: { type: "test.ready" } } as any)
     const saved = JSON.parse(readFileSync(ravenConfigFile, "utf-8"))
     expect(saved.raven_seek.model).toBe("opencode/replacement-free")
     expect(saved.raven_seek.autoSelectedModel).toBe("opencode/replacement-free")
-    expect(saved.raven_mcp.model).toBe("provider/manual")
-    expect(saved.raven_mcp.autoSelectedModel).toBeUndefined()
+    expect(saved.raven_act.model).toBe("provider/manual")
+    expect(saved.raven_act.autoSelectedModel).toBeUndefined()
+    expect(saved.raven_act.onDemandClis.sample.command).toEqual(["sample"])
+    expect(saved.raven_act.instructions).toContain("Keep existing CLI instructions.")
+    expect(saved.raven_mcp).toBeUndefined()
+    expect(saved.raven_cli).toBeUndefined()
     await hooks.dispose?.()
   })
 
@@ -227,14 +232,14 @@ describe("Raven configuration migration", () => {
       excludeTools: ["glob"],
       timeout: 321,
     })
-    expect(migrated.raven_mcp).toMatchObject({
+    expect(migrated.raven_act).toMatchObject({
       model: "provider/legacy",
       reasoning_effort: "high",
       instructions: "legacy instructions",
       timeout: 321,
       descriptionDetail: "minimized",
     })
-    expect(migrated.raven_mcp.onDemandMcpServers.privateDocs.headers.Authorization).toBe("secret")
+    expect(migrated.raven_act.onDemandMcpServers.privateDocs.headers.Authorization).toBe("secret")
     expect(migrated.stats).toEqual({ bytes: 42 })
   })
 
@@ -242,7 +247,7 @@ describe("Raven configuration migration", () => {
     mkdirSync(ravenConfigDir, { recursive: true })
     writeFileSync(ravenConfigFile, JSON.stringify({
       raven_seek: { model: "provider/search", reasoning_effort: "medium" },
-      raven_mcp: { model: "provider/mcp", reasoning_effort: "high", onDemandMcpServers: {} },
+      raven_act: { model: "provider/mcp", reasoning_effort: "high", onDemandMcpServers: {} },
     }))
     const hooks = await RavenPlugin(pluginInput({ session: {} }))
     const config: any = { mcp: {}, instructions: [] }
@@ -251,17 +256,19 @@ describe("Raven configuration migration", () => {
 
     expect(config.agent.raven.model).toBe("provider/search")
     expect(config.agent.raven.options.reasoning_effort).toBe("medium")
-    expect(config.agent["raven-mcp"].model).toBe("provider/mcp")
-    expect(config.agent["raven-mcp"].options.reasoning_effort).toBe("high")
+    expect(config.agent["raven-act"].model).toBe("provider/mcp")
+    expect(config.agent["raven-act"].options.reasoning_effort).toBe("high")
     expect(config.agent.raven.permission.raven_mcp_bridge).toBe("deny")
-    expect(config.agent["raven-mcp"].permission["*"]).toBeUndefined()
+    expect(config.agent["raven-act"].permission["*"]).toBeUndefined()
     for (const action of ["read", "glob", "grep", "list", "bash", "external_directory"]) {
-      expect(config.agent["raven-mcp"].permission[action]).toBe(config.agent.raven.permission[action])
+      expect(config.agent["raven-act"].permission[action]).toBe(config.agent.raven.permission[action])
     }
-    for (const action of ["edit", "task", "raven_seek", "raven_mcp"]) {
-      expect(config.agent["raven-mcp"].permission[action]).toBe("deny")
+    for (const action of ["edit", "task", "raven_seek", "raven_act"]) {
+      expect(config.agent["raven-act"].permission[action]).toBe("deny")
     }
-    expect(config.agent["raven-mcp"].permission.raven_mcp_bridge).toBe("allow")
+    expect(config.agent["raven-act"].permission.raven_mcp_bridge).toBe("allow")
+    expect(config.agent["raven-act"].permission.raven_cli_bridge).toBe("allow")
+    expect(config.agent["raven-act"].permission.raven_cli_execute).toBe("allow")
     await hooks.dispose?.()
   })
 })
@@ -406,7 +413,7 @@ describe("raven_seek session continuation", () => {
     mkdirSync(ravenConfigDir, { recursive: true })
     writeFileSync(ravenConfigFile, JSON.stringify({
       raven_seek: { model: "provider/search" },
-      raven_mcp: { model: "provider/mcp", onDemandMcpServers: {} },
+      raven_act: { model: "provider/mcp", onDemandMcpServers: {} },
     }))
     const create = mock(async () => ({ data: { id: "ses_deleted" } }))
     const prompt = mock(async () => ({
@@ -438,8 +445,8 @@ describe("raven_seek session continuation", () => {
   })
 })
 
-describe("Raven MCP delegation", () => {
-  test("uses the dedicated MCP agent and root-level parent", async () => {
+describe("Raven Act delegation", () => {
+  test("uses the shared operator agent and root-level parent", async () => {
     const get = mock(async ({ path }: any) => ({
       data: path.id === "ses_parent"
         ? { id: "ses_parent", parentID: "ses_root", projectID: "project-1" }
@@ -456,8 +463,8 @@ describe("Raven MCP delegation", () => {
 
     expect((create.mock.calls[0] as any)[0].body.parentID).toBe("ses_root")
     expect((update.mock.calls[0] as any)[0].path.id).toBe("ses_mcp")
-    expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven-mcp")
-    expect(result.output).toContain("later `raven_mcp` call")
+    expect((prompt.mock.calls[0] as any)[0].body.agent).toBe("raven-act")
+    expect(result.output).toContain("later `raven_act` call")
   })
 
   test("blocks the internal bridge outside the MCP agent", async () => {
@@ -473,10 +480,10 @@ describe("Raven MCP delegation", () => {
       error = caught as Error
     }
 
-    expect(error?.message).toContain("only available inside the Raven MCP agent")
+    expect(error?.message).toContain("only available inside Raven Act")
   })
 
-  test("rejects a search-agent session passed to raven_mcp", async () => {
+  test("rejects a search-agent session passed to raven_act", async () => {
     const get = mock(async ({ path }: any) => ({
       data: path.id === "ses_parent"
         ? { id: "ses_parent", projectID: "project-1" }
@@ -492,7 +499,7 @@ describe("Raven MCP delegation", () => {
     const result = await mcp.execute({ query: "Continue", sessionId: "ses_search" }, context)
 
     expect(prompt).not.toHaveBeenCalled()
-    expect(result.output).toContain("does not belong to the raven-mcp agent")
+    expect(result.output).toContain("does not belong to the raven-act agent")
   })
 })
 
@@ -632,15 +639,15 @@ async function setupV2(fixture = v2Fixture(), servers: Record<string, any> = {})
   mkdirSync(ravenConfigDir, { recursive: true })
   writeFileSync(ravenConfigFile, JSON.stringify({
     raven_seek: { model: "provider/search" },
-    raven_mcp: { model: "provider/mcp", onDemandMcpServers: servers },
+    raven_act: { model: "provider/mcp", onDemandMcpServers: servers },
   }))
   const cleanup = await RavenModule.setup(fixture.ctx as unknown as V2Plugin.Context)
   return { ...fixture, cleanup: cleanup as () => Promise<void> }
 }
 
 describe("OpenCode 2 integration", () => {
-  test("defaults both retrieval tools to background and delivers once to the calling session", async () => {
-    for (const name of ["raven_seek", "raven_mcp"]) {
+  test("supports background search/operator tools and delivers once to the calling session", async () => {
+    for (const name of ["raven_seek", "raven_act"]) {
       const f = await setupV2()
       const waiting = Promise.withResolvers<void>()
       const finish = Promise.withResolvers<void>()
@@ -657,7 +664,7 @@ describe("OpenCode 2 integration", () => {
         // Child attaches to the root, but completion returns to the actual caller.
         f.sessions.set("ses_parent", { id: "ses_parent", projectID: "project-1", parentID: "ses_root" })
         f.sessions.set("ses_root", { id: "ses_root", projectID: "project-1" })
-        const result = await f.tools[name].execute({ query: "Independent research" }, { ...f.context, signal: caller.signal })
+        const result = await f.tools[name].execute({ query: "Independent research", ...(name === "raven_act" ? { background: true } : {}) }, { ...f.context, signal: caller.signal })
         await waiting.promise
         expect(result.content).toContain("started in the background")
         expect(result.content).not.toContain("Result")
@@ -723,7 +730,7 @@ describe("OpenCode 2 integration", () => {
         waiting.resolve()
         await new Promise<void>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true }))
       })
-      const failed = await f.tools.raven_mcp.execute({ query: "Provider failure" }, f.context)
+      const failed = await f.tools.raven_act.execute({ query: "Provider failure", background: true }, f.context)
       await waiting.promise
       f.emit("session.execution.failed", { sessionID: failed.metadata.sessionId, error: { type: "APIError", message: "Quota exhausted", status: 429 } })
       await delivered.promise
@@ -820,14 +827,14 @@ describe("OpenCode 2 integration", () => {
     const f = await setupV2()
     const delivered = Promise.withResolvers<void>()
     f.session.synthetic.mockImplementation(async () => { delivered.resolve(); return { id: "msg_notice" } })
-    await f.tools.raven_mcp.execute({ query: "Recover crash" }, f.context)
+    await f.tools.raven_act.execute({ query: "Recover crash", background: true }, f.context)
     await delivered.promise
     await f.cleanup()
     const [input] = f.session.synthetic.mock.calls[0]
     // Simulate a crash after admission but before recording a completed answer.
     // The key is location-scoped exactly as it was for the running request.
     const key = f.ctx.storage.set.mock.calls[0][0]
-    f.storage.set(key, { id: input.id, parentID: "ses_parent", sessionId: input.metadata.sessionId, tool: "raven_mcp", query: "Recover crash" })
+    f.storage.set(key, { id: input.id, parentID: "ses_parent", sessionId: input.metadata.sessionId, tool: "raven_act", query: "Recover crash" })
     const recovered = await setupV2(f)
     try {
       expect(f.session.synthetic.mock.calls[1][0].text).toContain("interrupted by a plugin/service restart")
@@ -865,12 +872,12 @@ describe("OpenCode 2 integration", () => {
       expect(f.agents.raven.model).toEqual({ providerID: "provider", id: "search" })
       expect(f.agents.raven.permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
       expect(f.agents.raven.permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "read", resource: "*", effect: "allow" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
-      expect(f.agents["raven-mcp"].permissions).toContainEqual({ action: "raven_mcp_bridge", resource: "*", effect: "allow" })
-      expect(Object.keys(f.tools)).toEqual(["raven_seek", "raven_mcp", "raven_mcp_bridge"])
+      expect(f.agents["raven-act"].permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" })
+      expect(f.agents["raven-act"].permissions).toContainEqual({ action: "read", resource: "*", effect: "allow" })
+      expect(f.agents["raven-act"].permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+      expect(f.agents["raven-act"].permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
+      expect(f.agents["raven-act"].permissions).toContainEqual({ action: "raven_mcp_bridge", resource: "*", effect: "allow" })
+      expect(Object.keys(f.tools)).toEqual(["raven_cli_bridge", "raven_seek", "raven_act", "raven_mcp_bridge"])
       expect(f.tools.raven_seek.input.required).toEqual(["query"])
       expect(f.commands.raven).toBeDefined()
       expect(f.ctx.agent.reload).toHaveBeenCalledTimes(1)
@@ -905,9 +912,9 @@ describe("OpenCode 2 integration", () => {
     f.sessions.set("ses_parent", { id: "ses_parent", projectID: "project-1", parentID: "ses_root" })
     f.sessions.set("ses_root", { id: "ses_root", projectID: "project-1" })
     try {
-      await f.tools.raven_mcp.execute({ query: "Find MCP docs", background: false }, f.context)
+      await f.tools.raven_act.execute({ query: "Find MCP docs" }, f.context)
       expect(f.session.create.mock.calls[0][0]).toMatchObject({
-        parentID: "ses_root", agent: "raven-mcp", model: { providerID: "provider", id: "mcp" },
+        parentID: "ses_root", agent: "raven-act", model: { providerID: "provider", id: "mcp" },
       })
     } finally { await f.cleanup() }
   })
@@ -921,14 +928,14 @@ describe("OpenCode 2 integration", () => {
       await expect(before("shell", { command: "rg query ." })).rejects.toThrow("raven_seek")
       await before("shell", { command: "git status | rg modified" })
       for (const tool of ["websearch", "webfetch", "fetch", "globalDocs_search"]) {
-        await expect(before(tool, { query: "online evidence" })).rejects.toThrow(`raven_mcp(query="${tool}: online evidence")`)
-        await before(tool, { query: "direct online evidence" }, "raven-mcp")
+        await expect(before(tool, { query: "online evidence" })).rejects.toThrow(`raven_act(query="${tool}: online evidence")`)
+        await before(tool, { query: "direct online evidence" }, "raven-act")
       }
       await before("grep", { pattern: "direct" }, "raven")
       await expect(before("raven_seek", { query: "recursive" }, "raven")).rejects.toThrow("cannot be called")
-      await expect(before("raven_mcp", { query: "recursive" }, "raven-mcp")).rejects.toThrow("cannot be called")
+      await expect(before("raven_act", { query: "recursive" }, "raven-act")).rejects.toThrow("cannot be called")
       await expect(before("raven_mcp_bridge", {})).rejects.toThrow("only available inside")
-      await before("raven_mcp_bridge", {}, "raven-mcp")
+      await before("raven_mcp_bridge", {}, "raven-act")
     } finally { await f.cleanup() }
   })
 
@@ -943,8 +950,8 @@ describe("OpenCode 2 integration", () => {
       await f.hooks["tool.execute.before"]({ tool: "shell", input: { command: "rg query ." }, agent: "build", sessionID: "ses_parent", id: "call_1" })
       const event = { sessionID: "ses_parent", agent: "build", system: [] as any[] }
       await f.hooks["session.context"](event)
-      expect(event.system[0].text).toContain("Raven performs search and information retrieval only")
-      expect(event.system[0].text).toContain("retry through `raven_mcp`, not `raven_seek`")
+      expect(event.system[0].text).toContain("Raven Act operates apps, websites, and tools")
+      expect(event.system[0].text).toContain("retry through `raven_act`, not `raven_seek`")
       const ravenEvent = { sessionID: "ses_raven", agent: "raven", system: [] as any[] }
       await f.hooks["session.context"](ravenEvent)
       expect(ravenEvent.system).toEqual([])
@@ -955,7 +962,7 @@ describe("OpenCode 2 integration", () => {
     const f = await setupV2()
     try {
       f.ctx.mcp.transform.mock.calls[0][0]({ list: () => [["laterDocs", { type: "remote", url: "https://example.com/mcp" }]] })
-      await expect(f.hooks["tool.execute.before"]({ tool: "laterDocs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_mcp")
+      await expect(f.hooks["tool.execute.before"]({ tool: "laterDocs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_act")
     } finally { await f.cleanup() }
   })
 
@@ -975,7 +982,7 @@ describe("OpenCode 2 integration", () => {
   test("auto-approves public delegation without overriding denials or other tool permissions", async () => {
     const f = await setupV2()
     try {
-      for (const action of ["raven_seek", "raven_mcp"]) {
+      for (const action of ["raven_seek", "raven_act"]) {
         const event = { action, effect: "ask" }
         await f.hooks["permission.evaluate"](event)
         expect(event.effect).toBe("allow")
@@ -993,10 +1000,10 @@ describe("OpenCode 2 integration", () => {
 
   test("approves all Raven asks without changing denials, other agents, or configured policies", async () => {
     const f = await setupV2()
-    const permissions = Object.fromEntries(["raven", "raven-mcp"].map((agent) => [agent, [...f.agents[agent].permissions]]))
-    const actions = ["skill", "webfetch", "websearch", "fetch", "globalDocs_search", "execute", "edit", "shell", "read", "unknownMcp_search", "raven_mcp_bridge", "subagent"]
+    const permissions = Object.fromEntries(["raven", "raven-act"].map((agent) => [agent, [...f.agents[agent].permissions]]))
+    const actions = ["skill", "webfetch", "websearch", "fetch", "globalDocs_search", "execute", "edit", "shell", "read", "unknownMcp_search", "raven_mcp_bridge", "raven_cli_bridge", "raven_cli_execute", "subagent"]
     try {
-      for (const agent of ["raven", "raven-mcp"]) {
+      for (const agent of ["raven", "raven-act"]) {
         expect(permissions[agent]).not.toContainEqual({ action: "*", resource: "*", effect: "allow" })
         for (const action of actions) {
           const event = { agent, action, effect: "ask" }
@@ -1026,13 +1033,13 @@ describe("OpenCode 2 integration", () => {
         ["disabledDocs", { type: "remote", url: "https://example.com/mcp", disabled: true }],
       ] })
       for (const action of ["exa_docs_search", "globalDocs_search", "disabledDocs_search", "exa_docsOther_search"]) {
-        for (const agent of ["raven", "raven-mcp"]) {
+        for (const agent of ["raven", "raven-act"]) {
           const event = { agent, action, effect: "ask" }
           await f.hooks["permission.evaluate"](event)
           expect(event.effect).toBe("allow")
         }
       }
-      await expect(f.hooks["tool.execute.before"]({ tool: "exa_docs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_mcp")
+      await expect(f.hooks["tool.execute.before"]({ tool: "exa_docs_search", input: { query: "docs" }, agent: "build", sessionID: "ses_parent", id: "call_1" })).rejects.toThrow("raven_act")
     } finally { await f.cleanup() }
   })
 
@@ -1085,14 +1092,14 @@ describe("OpenCode 2 integration", () => {
       expect(fresh).toEqual({ refreshed: ["fixture"], failed: [] })
       expect(manual.text).toContain("Refreshed: fixture")
       expect(probes).toBe(2)
-      for (const agent of ["build", "raven-mcp"]) {
+      for (const agent of ["build", "raven-act"]) {
         const guidance = { sessionID: "ses_parent", agent, system: [] as any[] }
         await f.hooks["session.context"](guidance)
         expect(guidance.system[0].text).toContain("updated_tool")
         expect(guidance.system[0].text).not.toContain("first_tool")
-        expect(guidance.system[0].text).toContain(agent === "raven-mcp" ? "Use raven_mcp_bridge" : "public raven_mcp delegator")
+        expect(guidance.system[0].text).toContain(agent === "raven-act" ? "Use raven_mcp_bridge" : "through raven_act")
       }
-      expect(f.agents["raven-mcp"].system).not.toContain("Discovered capabilities:")
+      expect(f.agents["raven-act"].system).not.toContain("Discovered capabilities:")
 
       fail = true
       expect(await f.rpcHandlers.refreshMcps({})).toEqual({ refreshed: [], failed: ["fixture"] })
@@ -1282,7 +1289,7 @@ describe("OpenCode 2 integration", () => {
     try {
       for (const [id, info, messages] of [
         ["ses_foreign", { parentID: "ses_other", agent: "raven" }, [{ id: "u1", type: "user" }]],
-        ["ses_wrong", { parentID: "ses_parent", agent: "raven-mcp" }, [{ id: "u1", type: "user" }]],
+        ["ses_wrong", { parentID: "ses_parent", agent: "raven-act" }, [{ id: "u1", type: "user" }]],
         ["ses_switched", { parentID: "ses_parent", agent: "raven", metadata: { opencodeRavenAgent: "raven" } }, [
           { id: "s1", type: "agent-switched", agent: "build" },
           { id: "u1", type: "user", text: "Other agent's work" },
@@ -1380,7 +1387,7 @@ describe("OpenCode 2 integration", () => {
   test("auto-detects enabled, free, tool-capable native models and requests restart", async () => {
     const f = v2Fixture()
     mkdirSync(ravenConfigDir, { recursive: true })
-    writeFileSync(ravenConfigFile, JSON.stringify({ raven_seek: {}, raven_mcp: { onDemandMcpServers: {} } }))
+    writeFileSync(ravenConfigFile, JSON.stringify({ raven_seek: {}, raven_act: { onDemandMcpServers: {} } }))
     f.ctx.model.list = mock(async () => ({ data: [
       { id: "free-choice", providerID: "opencode", enabled: true, status: "active", time: { released: 1000 }, capabilities: { tools: true }, cost: [{ input: 0, output: 0 }], limit: { context: 100000 } },
       { id: "disabled-free", providerID: "opencode", enabled: false, status: "active", time: { released: 2000 }, capabilities: { tools: true }, cost: [{ input: 0, output: 0 }], limit: { context: 200000 } },

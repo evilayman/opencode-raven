@@ -10,14 +10,17 @@ import { RavenRpc } from "../rpc"
 const host = Bun.argv[2]
 if (host !== "v1" && host !== "v2") throw new Error("Usage: bun scripts/smoke-compat.ts v1|v2 [executable]")
 const executable = Bun.argv[3] ?? "opencode"
-const home = mkdtempSync(join(tmpdir(), "raven-host-smoke-"))
+const temporary = process.platform === "win32" && process.env.LOCALAPPDATA
+  ? join(process.env.LOCALAPPDATA, "Temp", "opencode") : tmpdir()
+mkdirSync(temporary, { recursive: true })
+const home = mkdtempSync(join(temporary, "raven-host-smoke-"))
 const workspace = join(home, "workspace")
 const configDir = join(home, ".config", "opencode")
 mkdirSync(workspace, { recursive: true })
 mkdirSync(join(configDir, "opencode-raven"), { recursive: true })
 writeFileSync(join(configDir, "opencode-raven", "raven-config.json"), JSON.stringify({
   raven_seek: { model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval" },
-  raven_mcp: { model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval", onDemandMcpServers: {} },
+  raven_act: { model: host === "v1" ? "opencode/big-pickle" : "raven-smoke/retrieval", onDemandMcpServers: {} },
 }))
 const plugin = pathToFileURL(resolve(import.meta.dirname!, "..", ...(host === "v1" ? ["index.ts"] : []))).href
 const plugins = [plugin]
@@ -38,6 +41,17 @@ const env: NodeJS.ProcessEnv = {
 for (const key of ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_PURE", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_DEFAULT_PLUGINS"]) delete env[key]
 let proc: ReturnType<typeof Bun.spawn> | undefined
 let logs = ""
+async function stopHost() {
+  if (!proc || proc.exitCode !== null) return
+  if (process.platform === "win32") {
+    // A launcher or graceful shutdown can keep inherited output pipes open.
+    // This is an isolated fixture server: terminate its entire owned tree.
+    const killer = Bun.spawn([`${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`, "/PID", String(proc.pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" })
+    await killer.exited
+  }
+  if (proc.exitCode === null) proc.kill("SIGKILL")
+  await proc.exited
+}
 try {
   if (host === "v1") {
     proc = Bun.spawn([executable, "debug", "agent", "raven"], { cwd: workspace, env, stdout: "pipe", stderr: "pipe" })
@@ -75,7 +89,7 @@ try {
       await Bun.sleep(100)
       agents = await client.agent.list({ location: { directory: workspace } }, options)
     }
-    for (const id of ["raven", "raven-mcp"]) {
+    for (const id of ["raven", "raven-act"]) {
       const agent = agents.data.find((agent) => agent.id === id)
       if (agent?.mode !== "subagent" || agent.model?.id !== "retrieval") {
         const plugins = await client.plugin.list({ location: { directory: workspace } }, options)
@@ -126,14 +140,13 @@ try {
     if (retried.filter((message) => message.type === "synthetic" && message.id === notice.id).length !== 1) throw new Error("Duplicate background result admission")
     await client.session.remove({ sessionID: background.id }, options)
     console.log("v2: native agents, commands/RPC, routing, foreground and background Raven delegation passed (offline model)")
-    proc.kill()
-    await proc.exited
+    await stopHost()
     await Promise.all(collectors)
   }
 } catch (error) {
   if (logs) console.error(logs)
   throw error
 } finally {
-  if (proc && proc.exitCode === null) { proc.kill(); await proc.exited }
+  await stopHost()
   rmSync(home, { recursive: true, force: true })
 }
