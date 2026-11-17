@@ -32,7 +32,9 @@ jobs:
           bun -e 'const { version } = await Bun.file("package.json").json(); const ref = process.env.GITHUB_REF; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Only stable versions can be published as latest"); if (ref.startsWith("refs/tags/") && ref !== `refs/tags/v${version}`) throw new Error("Tag must match package.json version");'
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bun test
+      - name: Run tests
+        timeout-minutes: 3
+        run: bun test
       - run: bun pm pack --dry-run
 
   publish:

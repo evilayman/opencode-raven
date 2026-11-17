@@ -11,6 +11,7 @@ import { RGBA, ScrollBoxRenderable, type BoxRenderable } from "@opentui/core"
 const RavenPlugin = RavenModule.server
 
 const originalUserProfile = process.env.USERPROFILE
+const originalHome = process.env.HOME
 const testHome = join(tmpdir(), `opencode-raven-test-${process.pid}`)
 const ravenLog = join(tmpdir(), "raven-sessions.log")
 const ravenConfigDir = join(testHome, ".config", "opencode", "opencode-raven")
@@ -21,6 +22,7 @@ beforeAll(() => {
   if (existsSync(ravenLog)) originalRavenLog = readFileSync(ravenLog)
   mkdirSync(testHome, { recursive: true })
   process.env.USERPROFILE = testHome
+  process.env.HOME = testHome
 })
 
 beforeEach(() => {
@@ -30,6 +32,8 @@ beforeEach(() => {
 afterAll(() => {
   if (originalUserProfile === undefined) delete process.env.USERPROFILE
   else process.env.USERPROFILE = originalUserProfile
+  if (originalHome === undefined) delete process.env.HOME
+  else process.env.HOME = originalHome
   rmSync(testHome, { recursive: true, force: true })
   if (originalRavenLog) writeFileSync(ravenLog, originalRavenLog)
   else rmSync(ravenLog, { force: true })
