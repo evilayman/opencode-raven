@@ -13,10 +13,16 @@ concurrency:
   group: npm-publish
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   checks:
     if: github.repository == 'evilayman/opencode-raven' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
+    # The current integration fixtures are validated on Windows. Publishing
+    # remains on a GitHub-hosted Linux runner for npm's trusted-publisher flow.
+    runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
