@@ -575,6 +575,31 @@ The native smoke checks use isolated configuration and data directories. The v2 
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Publishing
+
+`.github/workflows/publish.yml` publishes through [npm trusted publishing](https://docs.npmjs.com/trusted-publishers), without a stored npm token. Bun runs checks and creates the package; npm on Node 24 handles the OIDC-authenticated upload.
+
+Enable two-factor authentication on the npm owner account first (npm requires it to manage trusted publishers). Then use the package's **Settings → Trusted publishing**:
+
+- Provider: **GitHub Actions**
+- Organization/user: `evilayman`
+- Repository: `opencode-raven`
+- Workflow filename: `publish.yml`
+- Environment: leave blank
+- Allowed actions: enable **npm publish** for direct releases
+
+Alternatively, configure the same trust relationship from an authenticated terminal:
+
+```sh
+bunx --bun npm trust github opencode-raven --repo evilayman/opencode-raven --file publish.yml --allow-publish --yes
+```
+
+Complete any account-side 2FA/browser approval yourself; do not put npm tokens, authenticator secrets, or recovery codes in the repository.
+
+After the package version and changelog are committed to `master`, push a matching `v<version>` tag, or run **Publish npm package** manually on `master` from GitHub Actions. Tags must point to a commit on `master` and match the stable version in `package.json`. The manual option also releases a version whose tag predates this workflow.
+
+The workflow checks types and existing tests, packs the package, and publishes once as `latest`. Existing versions are skipped without changing tags. A successful upload is not retried if registry validation or propagation is pending; the workflow summary distinguishes upload acceptance from verified availability.
+
 ## Disclaimer
 
 opencode-raven is an independent project and is not affiliated with the OpenCode team. Released under the [MIT License](LICENSE).
