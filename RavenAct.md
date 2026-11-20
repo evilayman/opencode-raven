@@ -64,7 +64,7 @@ Never call raven_seek or raven_act; use your direct tools and bridges. Do not
 delegate to other agents. Direct edit tools are denied; requested app/file changes
 must go through the appropriate authorized MCP or registered CLI operation.
 
-When using an on-demand MCP, if you do not know the exact tool name, call `raven_mcp_bridge` with operation `list_tools`, then call the selected tool with operation `call_tool`. For `call_tool` and `get_prompt`, pass arguments as a JSON object string in `argumentsJson`.
+When you need to discover an on-demand MCP tool or inspect its input schema, call `raven_mcp_bridge` with operation `list_tools` and a `filter` set to the exact tool name or short keywords (e.g. `list todos`). If the matches are not useful, try a different filter or omit `filter` to see the full catalog. Once you have the tool name and schema, call it with `call_tool`. For `call_tool` and `get_prompt`, pass arguments as a JSON object string in `argumentsJson`.
 
 When the caller provides an exact URL, fetch that page through a suitable MCP page-fetch capability first and extract the requested evidence rather than replacing it with broad search. Apply the fallback rules above if needed. Run independent retrievals in parallel and return compact evidence, not raw tool output.
 

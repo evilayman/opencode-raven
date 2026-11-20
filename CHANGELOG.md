@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.1
+
+### Added
+- Filtered MCP tool discovery: Raven Act can search tool names, titles, and descriptions and load up to 10 matching input schemas. Omit the filter to retrieve the full catalog.
+
+### Changed
+- Minimized MCP guidance is now the default. It shows one short description per server, preferring the configured description over generated text. Existing explicit `full` settings are preserved.
+
 ## 2.4.0
 
 ### Added

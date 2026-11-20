@@ -20,7 +20,7 @@
       <ul>
         <li>Routes local search and filesystem discovery through lightweight <code>raven_seek</code>.</li>
         <li>Uses one configurable <code>raven_act</code> operator for MCP-first online research and requested app, website, and tool operations.</li>
-        <li>Keeps optional on-demand MCP schemas out of the main model's tool list.</li>
+        <li>Keeps on-demand MCP schemas out of the main model's tool list and loads matching schemas in Raven Act only as needed.</li>
         <li>Combines MCP and registered CLI bridges in the same operator session, with Raven's existing auto-approval.</li>
         <li>Preconfigures Context7, Exa, and Grep.app endpoints.</li>
         <li>Tracks estimated main-session context avoided by delegation.</li>
@@ -31,7 +31,7 @@
 
 ## Install
 
-**Raven 2.4.0 supports OpenCode V2 (2.0.26+).** OpenCode V1 (1.18.29+) remains supported in the same package—no separate plugin is needed.
+**Raven 2.4.1 supports OpenCode V2 (2.0.26+).** OpenCode V1 (1.18.29+) remains supported in the same package—no separate plugin is needed.
 
 ### OpenCode V2
 
@@ -171,6 +171,8 @@ OpenCode's built-in tools already exist; Raven routes selected calls instead of 
 
 On-demand MCPs are different: Raven discovers and calls them internally, so their full schemas are not registered globally. Enabled servers are probed after startup to discover tools and health, then per-session connections are opened when Raven uses them. "On-demand" describes schema exposure and normal use, not the absence of a startup health probe.
 
+Raven Act starts tool discovery with a short `filter` on `raven_mcp_bridge`'s `list_tools` operation. The bridge matches tool names, titles, and descriptions and returns up to 10 matches with input schemas. If filtering misses the right tool, Raven Act can try different keywords or omit `filter` to retrieve the full catalog. Filtering limits what enters the Act session, not what Raven retrieves from the MCP server or records in its metadata cache.
+
 On OpenCode V2, reopening the TUI triggers a fresh background health and tool-discovery check even if the shared service is still running. This runs once per workspace per TUI launch; returning from sessions or reactivating the plugin does not repeat it. Overlapping attachment checks share the same refresh. Use `/raven mcp refresh [server_name]` to retry manually without restarting the service.
 
 Automatic and manual MCP refreshes use top-right notifications for progress and results, without opening a command dialog or a session tab.
@@ -201,9 +203,11 @@ Manual edits require an OpenCode restart. Route and timeout commands apply immed
 | `raven_act.reasoning_effort` | `low` | Operator reasoning option. |
 | `raven_act.instructions` | `""` | Extra operator instructions shared across both bridges. |
 | `raven_act.timeout` | `600` | Shared delegation and fallback MCP connection timeout in seconds. |
-| `raven_act.descriptionDetail` | `"full"` | Full or minimized generated MCP guidance. |
+| `raven_act.descriptionDetail` | `"minimized"` | One short summary per MCP, without tool listings. Use `"full"` to include generated tool names and descriptions. |
 | `raven_act.onDemandMcpServers` | Context7, Exa, Grep.app | Remote HTTP/SSE or local stdio MCP definitions. |
 | `raven_act.onDemandClis` | `{}` | Named external CLI definitions; none installed or probed automatically. |
+
+Minimized guidance prefers each server's configured `description` and falls back to a generated summary if none is set. Summaries are capped at 180 characters. The default applies when no detail level is set; existing `"full"` settings are preserved. Either mode can discover tools through `list_tools`.
 
 Existing flat configuration and the former `raven_mcp`/`raven_cli` sections migrate
 automatically into `raven_seek` and `raven_act`. The operator keeps MCP definitions,
